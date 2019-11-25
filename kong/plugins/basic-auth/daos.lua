@@ -1,32 +1,34 @@
-local singletons = require "kong.singletons"
+local typedefs = require "kong.db.schema.typedefs"
 local crypto = require "kong.plugins.basic-auth.crypto"
 
-local function encrypt_password(password, credential)
-  -- Don't re-encrypt the password digest on update, if the password hasn't changed
-  -- This causes a bug when a new password is effectively equal the to previous digest
-  -- TODO: Better handle this scenario
-  if credential.id and singletons.dao then
-    local result = singletons.dao.basicauth_credentials:find {id = credential.id}
-    if result and result.password == credential.password then
-      return true
-    end
-  end
 
-  credential.password = crypto.encrypt(credential)
-  return true
-end
-
-local SCHEMA = {
-  primary_key = {"id"},
-  table = "basicauth_credentials",
-  cache_key = { "username" },
-  fields = {
-    id = {type = "id", dao_insert_value = true},
-    created_at = {type = "timestamp", immutable = true, dao_insert_value = true},
-    consumer_id = {type = "id", required = true, foreign = "consumers:id"},
-    username = {type = "string", required = true, unique = true },
-    password = {type = "string", func = encrypt_password, trim_whitespace = false}
+return {
+  basicauth_credentials = {
+    name = "basicauth_credentials",
+    primary_key = { "id" },
+    cache_key = { "username" },
+    endpoint_key = "username",
+    -- Passwords are hashed, so the exported passwords would contain the hashes.
+    -- Importing them back would require "plain" non-hashed passwords instead.
+    db_export = false,
+    admin_api_name = "basic-auths",
+    admin_api_nested_name = "basic-auth",
+    fields = {
+      { id = typedefs.uuid },
+      { created_at = typedefs.auto_timestamp_s },
+      { consumer = { type = "foreign", reference = "consumers", required = true, on_delete = "cascade" }, },
+      { username = { type = "string", required = true, unique = true }, },
+      { password = { type = "string", required = true }, },
+      { tags     = typedefs.tags },
+    },
+    transformations = {
+      {
+        input = { "password" },
+        needs = { "consumer.id" },
+        on_write = function(password, consumer_id)
+          return { password = crypto.hash(consumer_id, password) }
+        end,
+      },
+    },
   },
 }
-
-return {basicauth_credentials = SCHEMA}

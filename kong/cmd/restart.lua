@@ -18,9 +18,9 @@ local function execute(args)
     args.prefix = conf.prefix
   end
 
-  log.enable()
-
   pcall(stop.execute, args, { quiet = true })
+
+  log.enable()
 
   -- ensure Nginx stopped
   local texp = ngx.time() + 5 -- 5s
@@ -47,6 +47,8 @@ Options:
  -p,--prefix      (optional string)   prefix at which Kong should be running
  --nginx-conf     (optional string)   custom Nginx configuration template
  --run-migrations (optional boolean)  optionally run migrations on the DB
+ --db-timeout     (default 60)
+ --lock-timeout   (default 60)
 ]]
 
 return {

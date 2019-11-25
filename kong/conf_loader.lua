@@ -4,18 +4,25 @@ local pl_stringx = require "pl.stringx"
 local constants = require "kong.constants"
 local pl_pretty = require "pl.pretty"
 local pl_config = require "pl.config"
-local ciphers = require "kong.tools.ciphers"
+local http_tls = require "http.tls"
 local pl_file = require "pl.file"
 local pl_path = require "pl.path"
 local tablex = require "pl.tablex"
 local utils = require "kong.tools.utils"
 local log = require "kong.cmd.utils.log"
 local env = require "kong.cmd.utils.env"
-local ip = require "kong.tools.ip"
+local ip = require "resty.mediador.ip"
 
 
 local fmt = string.format
 local concat = table.concat
+
+
+local cipher_suites = {
+  modern = http_tls.modern_cipher_list,
+  intermediate = http_tls.intermediate_cipher_list,
+  old = http_tls.old_cipher_list,
+}
 
 
 local DEFAULT_PATHS = {
@@ -31,15 +38,42 @@ local HEADER_KEY_TO_NAME = {
   [string.lower(HEADERS.VIA)] = HEADERS.VIA,
   [string.lower(HEADERS.SERVER)] = HEADERS.SERVER,
   [string.lower(HEADERS.PROXY_LATENCY)] = HEADERS.PROXY_LATENCY,
+  [string.lower(HEADERS.RESPONSE_LATENCY)] = HEADERS.RESPONSE_LATENCY,
+  [string.lower(HEADERS.ADMIN_LATENCY)] = HEADERS.ADMIN_LATENCY,
   [string.lower(HEADERS.UPSTREAM_LATENCY)] = HEADERS.UPSTREAM_LATENCY,
   [string.lower(HEADERS.UPSTREAM_STATUS)] = HEADERS.UPSTREAM_STATUS,
 }
 
 
-local DYNAMIC_KEY_PREFIXES = {
-  ["nginx_http_directives"] = "nginx_http_",
-  ["nginx_proxy_directives"] = "nginx_proxy_",
-  ["nginx_admin_directives"] = "nginx_admin_",
+local DYNAMIC_KEY_NAMESPACES = {
+  {
+    injected_conf_name = "nginx_http_status_directives",
+    prefix = "nginx_http_status_",
+  },
+  {
+    injected_conf_name = "nginx_http_upstream_directives",
+    prefix = "nginx_http_upstream_",
+  },
+  {
+    injected_conf_name = "nginx_http_directives",
+    prefix = "nginx_http_",
+  },
+  {
+    injected_conf_name = "nginx_stream_directives",
+    prefix = "nginx_stream_",
+  },
+  {
+    injected_conf_name = "nginx_proxy_directives",
+    prefix = "nginx_proxy_", -- TODO: nginx_http_proxy
+  },
+  {
+    injected_conf_name = "nginx_sproxy_directives",
+    prefix = "nginx_sproxy_", -- TODO: nginx_stream_proxy
+  },
+  {
+    injected_conf_name = "nginx_admin_directives",
+    prefix = "nginx_admin_", -- TODO: nginx_http_admin (optional)
+  },
 }
 
 
@@ -50,6 +84,7 @@ local PREFIX_PATHS = {
   admin_acc_logs = {"logs", "admin_access.log"},
   nginx_conf = {"nginx.conf"},
   nginx_kong_conf = {"nginx-kong.conf"},
+  nginx_kong_stream_conf = {"nginx-kong-stream.conf"},
 
   kong_env = {".kong_env"},
 
@@ -59,11 +94,9 @@ local PREFIX_PATHS = {
 
   client_ssl_cert_default = {"ssl", "kong-default.crt"},
   client_ssl_cert_key_default = {"ssl", "kong-default.key"},
-  client_ssl_cert_csr_default = {"ssl", "kong-default.csr"},
 
   admin_ssl_cert_default = {"ssl", "admin-kong-default.crt"},
   admin_ssl_cert_key_default = {"ssl", "admin-kong-default.key"},
-  admin_ssl_cert_csr_default = {"ssl", "admin-kong-default.csr"},
 }
 
 
@@ -82,13 +115,31 @@ local CONF_INFERENCES = {
   -- forced string inferences (or else are retrieved as numbers)
   proxy_listen = { typ = "array" },
   admin_listen = { typ = "array" },
+  status_listen = { typ = "array" },
+  stream_listen = { typ = "array" },
+  origins = { typ = "array" },
   db_update_frequency = {  typ = "number"  },
   db_update_propagation = {  typ = "number"  },
   db_cache_ttl = {  typ = "number"  },
   db_resurrect_ttl = {  typ = "number"  },
+  db_cache_warmup_entities = { typ = "array" },
   nginx_user = { typ = "string" },
   nginx_worker_processes = { typ = "string" },
-  upstream_keepalive = { typ = "number" },
+  upstream_keepalive = { -- TODO: remove since deprecated in 1.3
+    typ = "number",
+    deprecated = {
+      replacement = "nginx_http_upstream_keepalive",
+      alias = function(conf)
+        -- called before check_and_infer(), must parse ourselves
+        if tonumber(conf.upstream_keepalive) == 0 then
+          conf.nginx_http_upstream_keepalive = "NONE"
+
+        elseif conf.nginx_http_upstream_keepalive == nil then
+          conf.nginx_http_upstream_keepalive = tostring(conf.upstream_keepalive)
+        end
+      end,
+    }
+  },
   headers = { typ = "array" },
   trusted_ips = { typ = "array" },
   real_ip_header = { typ = "string" },
@@ -103,11 +154,14 @@ local CONF_INFERENCES = {
                          }
                        },
 
-  database = { enum = { "postgres", "cassandra" }  },
+  database = { enum = { "postgres", "cassandra", "off" }  },
   pg_port = { typ = "number" },
+  pg_timeout = { typ = "number" },
   pg_password = { typ = "string" },
   pg_ssl = { typ = "boolean" },
   pg_ssl_verify = { typ = "boolean" },
+  pg_max_concurrent_queries = { typ = "number" },
+  pg_semaphore_timeout = { typ = "number" },
 
   cassandra_contact_points = { typ = "array" },
   cassandra_port = { typ = "number" },
@@ -134,6 +188,7 @@ local CONF_INFERENCES = {
                           }
                         },
   cassandra_local_datacenter = { typ = "string" },
+  cassandra_refresh_frequency = { typ = "number" },
   cassandra_repl_strategy = { enum = {
                                 "SimpleStrategy",
                                 "NetworkTopologyStrategy",
@@ -151,6 +206,8 @@ local CONF_INFERENCES = {
   dns_not_found_ttl = { typ = "number" },
   dns_error_ttl = { typ = "number" },
   dns_no_sync = { typ = "boolean" },
+  router_consistency = { enum = { "strict", "eventual" } },
+  router_update_frequency = { typ = "number" },
 
   client_ssl = { typ = "boolean" },
 
@@ -158,6 +215,8 @@ local CONF_INFERENCES = {
   proxy_error_log = { typ = "string" },
   admin_access_log = { typ = "string" },
   admin_error_log = { typ = "string" },
+  status_access_log = { typ = "string" },
+  status_error_log = { typ = "string" },
   log_level = { enum = {
                   "debug",
                   "info",
@@ -170,13 +229,13 @@ local CONF_INFERENCES = {
                 }
               },
   plugins = { typ = "array" },
-  custom_plugins = { typ = "array" },
   anonymous_reports = { typ = "boolean" },
   nginx_daemon = { typ = "ngx_boolean" },
   nginx_optimizations = { typ = "boolean" },
 
   lua_ssl_verify_depth = { typ = "number" },
   lua_socket_pool_size = { typ = "number" },
+  service_mesh = { typ = "boolean" },
 }
 
 
@@ -281,11 +340,15 @@ local function check_and_infer(conf)
   ---------------------
 
   if conf.database == "cassandra" then
-    if conf.cassandra_lb_policy == "DCAwareRoundRobin"
+    if string.find(conf.cassandra_lb_policy, "DCAware", nil, true)
        and not conf.cassandra_local_datacenter
     then
       errors[#errors + 1] = "must specify 'cassandra_local_datacenter' when " ..
-                          "DCAwareRoundRobin policy is in use"
+                            conf.cassandra_lb_policy .. " policy is in use"
+    end
+
+    if conf.cassandra_refresh_frequency < 0 then
+      errors[#errors + 1] = "cassandra_refresh_frequency must be 0 or greater"
     end
 
     for _, contact_point in ipairs(conf.cassandra_contact_points) do
@@ -366,11 +429,11 @@ local function check_and_infer(conf)
   end
 
   if conf.ssl_cipher_suite ~= "custom" then
-    local pok, perr = pcall(function()
-      conf.ssl_ciphers = ciphers(conf.ssl_cipher_suite)
-    end)
-    if not pok then
-      errors[#errors + 1] = perr
+    local list = cipher_suites[conf.ssl_cipher_suite]
+    if list then
+      conf.ssl_ciphers = list
+    else
+      errors[#errors + 1] = "Undefined cipher suite " .. tostring(conf.ssl_cipher_suite)
     end
   end
 
@@ -418,27 +481,102 @@ local function check_and_infer(conf)
 
   -- checking the trusted ips
   for _, address in ipairs(conf.trusted_ips) do
-    if not ip.valid(address) and not address == "unix:" then
+    if not ip.valid(address) and address ~= "unix:" then
       errors[#errors + 1] = "trusted_ips must be a comma separated list in " ..
                             "the form of IPv4 or IPv6 address or CIDR "      ..
                             "block or 'unix:', got '" .. address .. "'"
     end
   end
 
+  -- Validate origins
+  local seen_origins = {}
+
+  for i, v in ipairs(conf.origins) do
+    local from_scheme, from_host_port, to_host_port =
+      v:match("^(%a[%w+.-]*)://([^=]+:[%d]+)=%a[%w+.-]*://([^/]+)$")
+
+    if not from_scheme then
+      errors[#errors + 1] = "an origin must be of the form " ..
+                            "'from_scheme://from_host:from_port=" ..
+                            "to_scheme://to_host:to_port', got '" ..
+                            v .. "'"
+
+    else
+      -- Validate 'from'
+      local from_authority, err =
+        utils.format_host(utils.normalize_ip(from_host_port))
+      if not from_authority then
+        errors[#errors + 1] = "failed to parse authority: " .. err ..
+                              "(" .. from_host_port .. ")"
+
+      else
+        -- Check for duplicates
+        local from_origin = from_scheme:lower() .. "://" .. from_authority
+
+        if seen_origins[from_origin] then
+          errors[#errors + 1] = "duplicate origin (" .. from_origin .. ")"
+        end
+
+        seen_origins[from_origin] = true
+      end
+
+      -- Validate 'to'
+      local to, err = utils.normalize_ip(to_host_port)
+      if not to then
+        errors[#errors + 1] = "failed to parse authority (" .. err .. ")"
+      end
+    end
+  end
+
+  if conf.pg_max_concurrent_queries < 0 then
+    errors[#errors + 1] = "pg_max_concurrent_queries must be greater than 0"
+  end
+
+  if conf.pg_max_concurrent_queries ~= math.floor(conf.pg_max_concurrent_queries) then
+    errors[#errors + 1] = "pg_max_concurrent_queries must be an integer greater than 0"
+  end
+
+  if conf.pg_semaphore_timeout < 0 then
+    errors[#errors + 1] = "pg_semaphore_timeout must be greater than 0"
+  end
+
+  if conf.pg_semaphore_timeout ~= math.floor(conf.pg_semaphore_timeout) then
+    errors[#errors + 1] = "pg_semaphore_timeout must be an integer greater than 0"
+  end
+
+  if conf.router_update_frequency <= 0 then
+    errors[#errors + 1] = "router_update_frequency must be greater than 0"
+  end
+
+  if conf.service_mesh then
+    log.warn("You enabled the deprecated Service Mesh feature of " ..
+             "the Kong Gateway, which will cause upstream HTTPS request " ..
+             "to behave incorrectly. Service Mesh support" ..
+             "in Kong Gateway will be removed in the next release.")
+  end
+
   return #errors == 0, errors[1], errors
 end
 
 
-local function overrides(k, default_v, file_conf, arg_conf)
+local function overrides(k, default_v, opts, file_conf, arg_conf)
+  opts = opts or {}
+
   local value -- definitive value for this property
+  local escape -- whether to escape a value's octothorpes
 
   -- default values have lowest priority
 
-  if file_conf and file_conf[k] == nil then
-    -- PL will ignore empty strings, so we need a placeholer (NONE)
+  if file_conf and file_conf[k] == nil and not opts.no_defaults then
+    -- PL will ignore empty strings, so we need a placeholder (NONE)
     value = default_v == "NONE" and "" or default_v
+
   else
     value = file_conf[k] -- given conf values have middle priority
+  end
+
+  if opts.defaults_only then
+    return value, k
   end
 
   -- environment variables have higher priority
@@ -453,12 +591,24 @@ local function overrides(k, default_v, file_conf, arg_conf)
     end
 
     log.debug('%s ENV found with "%s"', env_name, to_print)
+
     value = env
+    escape = true
   end
 
   -- arg_conf have highest priority
   if arg_conf and arg_conf[k] ~= nil then
     value = arg_conf[k]
+    escape = true
+  end
+
+  if escape and type(value) == "string" then
+    -- Escape "#" in env vars or overrides to avoid them being mangled by
+    -- comments stripping logic.
+    repeat
+      local s, n = string.gsub(value, [[([^\])#]], [[%1\#]])
+      value = s
+    until n == 0
   end
 
   return value, k
@@ -497,17 +647,25 @@ end
 
 
 -- Parses a listener address line.
--- Supports multiple (comma separated) addresses, with 'ssl' and 'http2' flags.
+-- Supports multiple (comma separated) addresses, with flags such as
+-- 'ssl' and 'http2' added to the end.
 -- Pre- and postfixed whitespace as well as comma's are allowed.
 -- "off" as a first entry will return empty tables.
--- @value list of entries (strings)
--- @return list of parsed entries, each entry having fields `ip` (normalized string)
--- `port` (number), `ssl` (bool), `http2` (bool), `listener` (string, full listener)
-local function parse_listeners(values)
+-- @param values list of entries (strings)
+-- @param flags array of strings listing accepted flags.
+-- @return list of parsed entries, each entry having fields
+-- `listener` (string, full listener), `ip` (normalized string)
+-- `port` (number), and a boolean entry for each flag added to the entry
+-- (e.g. `ssl`).
+local function parse_listeners(values, flags)
+  assert(type(flags) == "table")
   local list = {}
-  local flags = { "ssl", "http2", "proxy_protocol" }
   local usage = "must be of form: [off] | <ip>:<port> [" ..
                 concat(flags, "] [") .. "], [... next entry ...]"
+
+  if #values == 0 then
+    return nil, usage
+  end
 
   if pl_stringx.strip(values[1]) == "off" then
     return list
@@ -551,24 +709,40 @@ local function parse_listeners(values)
 end
 
 
-local function parse_nginx_directives(dyn_key_prefix, conf)
+local function parse_nginx_directives(dyn_namespace, conf, injected_in_namespace)
   conf = conf or {}
   local directives = {}
 
   for k, v in pairs(conf) do
-    if type(k) == "string" then
-      local directive = string.match(k, dyn_key_prefix .. "(.+)")
+    if type(k) == "string" and not injected_in_namespace[k] then
+      local directive = string.match(k, dyn_namespace.prefix .. "(.+)")
       if directive then
-        if tonumber(v) then
-          v = string.format("%q", v)
+        if v ~= "NONE" then
+          table.insert(directives, { name = directive, value = v })
         end
 
-        table.insert(directives, { name = directive, value = v })
+        injected_in_namespace[k] = true
       end
     end
   end
 
   return directives
+end
+
+
+local function deprecated_properties(conf, opts)
+  for property_name, v_schema in pairs(CONF_INFERENCES) do
+    local deprecated = v_schema.deprecated
+
+    if deprecated and conf[property_name] ~= nil then
+      if not opts.from_kong_env then
+        log.warn("the '%s' configuration property is deprecated, use " ..
+                 "'%s' instead", property_name, v_schema.deprecated.replacement)
+      end
+
+      v_schema.deprecated.alias(conf)
+    end
+  end
 end
 
 
@@ -581,14 +755,19 @@ end
 -- @param[type=string] path (optional) Path to a configuration file.
 -- @param[type=table] custom_conf A key/value table with the highest precedence.
 -- @treturn table A table holding a valid configuration.
-local function load(path, custom_conf)
+local function load(path, custom_conf, opts)
+  opts = opts or {}
+
   ------------------------
   -- Default configuration
   ------------------------
 
   -- load defaults, they are our mandatory base
   local s = pl_stringio.open(kong_default_conf)
-  local defaults, err = pl_config.read(s)
+  local defaults, err = pl_config.read(s, {
+    smart = false,
+    list_delim = "_blank_" -- mandatory but we want to ignore it
+  })
   s:close()
   if not defaults then
     return nil, "could not load default conf: " .. err
@@ -648,11 +827,11 @@ local function load(path, custom_conf)
     -- find dynamic keys that need to be loaded
     local dynamic_keys = {}
 
-    local function find_dynamic_keys(dyn_key_prefix, t)
+    local function find_dynamic_keys(dyn_prefix, t)
       t = t or {}
 
       for k, v in pairs(t) do
-        local directive = string.match(k, "(" .. dyn_key_prefix .. ".+)")
+        local directive = string.match(k, "(" .. dyn_prefix .. ".+)")
         if directive then
           dynamic_keys[directive] = true
           t[k] = tostring(v)
@@ -678,32 +857,59 @@ local function load(path, custom_conf)
       end
     end
 
-    for _, dyn_key_prefix in pairs(DYNAMIC_KEY_PREFIXES) do
-      find_dynamic_keys(dyn_key_prefix, custom_conf)
-      find_dynamic_keys(dyn_key_prefix, kong_env_vars)
-      find_dynamic_keys(dyn_key_prefix, from_file_conf)
+    for _, dyn_namespace in ipairs(DYNAMIC_KEY_NAMESPACES) do
+      find_dynamic_keys(dyn_namespace.prefix, defaults) -- tostring() defaults
+      find_dynamic_keys(dyn_namespace.prefix, custom_conf)
+      find_dynamic_keys(dyn_namespace.prefix, kong_env_vars)
+      find_dynamic_keys(dyn_namespace.prefix, from_file_conf)
     end
 
     -- union (add dynamic keys to `defaults` to prevent removal of the keys
     -- during the intersection that happens later)
-    defaults = tablex.merge(defaults, dynamic_keys, true)
+    defaults = tablex.merge(dynamic_keys, defaults, true)
   end
 
-  -- merge default conf with file conf, ENV variables and arg conf (with precedence)
-  local conf = tablex.pairmap(overrides, defaults, from_file_conf, custom_conf)
+  -- merge file conf, ENV variables, and arg conf (with precedence)
+  local user_conf = tablex.pairmap(overrides, defaults,
+                                   { no_defaults = true },
+                                   from_file_conf, custom_conf)
+
+  if not opts.starting then
+    log.disable()
+  end
+
+  deprecated_properties(user_conf, opts)
+
+  -- merge user_conf with defaults
+  local conf = tablex.pairmap(overrides, defaults,
+                              { defaults_only = true },
+                              user_conf)
 
   -- validation
   local ok, err, errors = check_and_infer(conf)
+
+  if not opts.starting then
+    log.enable()
+  end
+
   if not ok then
     return nil, err, errors
   end
 
   conf = tablex.merge(conf, defaults) -- intersection (remove extraneous properties)
 
-  -- nginx directives from conf
-  for directives_block, dyn_key_prefix in pairs(DYNAMIC_KEY_PREFIXES) do
-    local directives = parse_nginx_directives(dyn_key_prefix, conf)
-    conf[directives_block] = setmetatable(directives, _nop_tostring_mt)
+  do
+    local injected_in_namespace = {}
+
+    -- nginx directives from conf
+    for _, dyn_namespace in ipairs(DYNAMIC_KEY_NAMESPACES) do
+      injected_in_namespace[dyn_namespace.injected_conf_name] = true
+
+      local directives = parse_nginx_directives(dyn_namespace, conf,
+                                                injected_in_namespace)
+      conf[dyn_namespace.injected_conf_name] = setmetatable(directives,
+                                                            _nop_tostring_mt)
+    end
   end
 
   do
@@ -749,22 +955,6 @@ local function load(path, custom_conf)
       end
     end
 
-    if conf.custom_plugins and #conf.custom_plugins > 0 then
-      local warned
-
-      for i = 1, #conf.custom_plugins do
-        local plugin_name = pl_stringx.strip(conf.custom_plugins[i])
-
-        if not plugins[plugin_name] and not warned then
-          log.warn("the 'custom_plugins' configuration property is " ..
-                   "deprecated, use 'plugins' instead")
-          warned = true
-        end
-
-        plugins[plugin_name] = true
-      end
-    end
-
     conf.loaded_plugins = setmetatable(plugins, _nop_tostring_mt)
   end
 
@@ -804,8 +994,13 @@ local function load(path, custom_conf)
   end
 
   do
+    local http_flags = { "ssl", "http2", "proxy_protocol", "transparent",
+                         "deferred", "bind", "reuseport" }
+    local stream_flags = { "proxy_protocol", "transparent", "bind",
+                           "reuseport" }
+
     -- extract ports/listen ips
-    conf.proxy_listeners, err = parse_listeners(conf.proxy_listen)
+    conf.proxy_listeners, err = parse_listeners(conf.proxy_listen, http_flags)
     if err then
       return nil, "proxy_listen " .. err
     end
@@ -820,7 +1015,14 @@ local function load(path, custom_conf)
       end
     end
 
-    conf.admin_listeners, err = parse_listeners(conf.admin_listen)
+    conf.stream_listeners, err = parse_listeners(conf.stream_listen, stream_flags)
+    if err then
+      return nil, "stream_listen " .. err
+    end
+
+    setmetatable(conf.stream_listeners, _nop_tostring_mt)
+
+    conf.admin_listeners, err = parse_listeners(conf.admin_listen, http_flags)
     if err then
       return nil, "admin_listen " .. err
     end
@@ -833,6 +1035,22 @@ local function load(path, custom_conf)
         conf.admin_ssl_enabled = true
         break
       end
+    end
+
+    conf.status_listeners, err = parse_listeners(conf.status_listen, { "ssl" })
+    if err then
+      return nil, "status_listen " .. err
+    end
+
+    setmetatable(conf.status_listeners, _nop_tostring_mt)
+  end
+
+  do
+    -- is ssl_preread compiled in OpenResty?
+    conf.ssl_preread_enabled = false
+    local nginx_configuration = ngx.config.nginx_configure()
+    if nginx_configuration:find("with-stream_ssl_preread_module", 1, true) then
+      conf.ssl_preread_enabled = true
     end
   end
 
@@ -859,6 +1077,8 @@ local function load(path, custom_conf)
 
     if enabled_headers.latency_tokens then
       enabled_headers[HEADERS.PROXY_LATENCY] = true
+      enabled_headers[HEADERS.RESPONSE_LATENCY] = true
+      enabled_headers[HEADERS.ADMIN_LATENCY] = true
       enabled_headers[HEADERS.UPSTREAM_LATENCY] = true
     end
 

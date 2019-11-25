@@ -3,6 +3,7 @@ local bit = require "bit"
 
 local band = bit.band
 local fmt = string.format
+local ngx_get_phase = ngx.get_phase
 
 
 local PHASES = {
@@ -18,6 +19,8 @@ local PHASES = {
   body_filter   = 0x00000400,
   --timer       = 0x00001000,
   log           = 0x00002000,
+  preread       = 0x00004000,
+  admin_api     = 0x10000000,
 }
 
 
@@ -54,14 +57,19 @@ end
 
 
 local function check_phase(accepted_phases)
-  if not kong then
+  if not kong or not kong.ctx then
     -- no _G.kong, we are likely in tests
     return
   end
 
   local current_phase = kong.ctx.core.phase
   if not current_phase then
-    error("no phase in kong.ctx.core.phase")
+    if ngx_get_phase() == "content" then
+      -- treat custom content blocks as the Admin API
+      current_phase = PHASES.admin_api
+    else
+      error("no phase in kong.ctx.core.phase")
+    end
   end
 
   if band(current_phase, accepted_phases) ~= 0 then
@@ -78,7 +86,7 @@ end
 
 
 local function check_not_phase(rejected_phases)
-  if not kong then
+  if not kong or not kong.ctx then
     -- no _G.kong, we are likely in tests
     return
   end
@@ -108,7 +116,8 @@ local public_phases = setmetatable({
                       PHASES.access,
                       PHASES.header_filter,
                       PHASES.body_filter,
-                      PHASES.log),
+                      PHASES.log,
+                      PHASES.admin_api),
 }, {
   __index = function(t, k)
     error("unknown phase or phase alias: " .. k)

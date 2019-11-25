@@ -5,12 +5,17 @@ proxy_access_log = logs/access.log
 proxy_error_log = logs/error.log
 admin_access_log = logs/admin_access.log
 admin_error_log = logs/error.log
+status_access_log = off
+status_error_log = logs/status_error.log
 plugins = bundled
-custom_plugins = NONE
 anonymous_reports = on
+service_mesh = off
 
-proxy_listen = 0.0.0.0:8000, 0.0.0.0:8443 ssl
-admin_listen = 127.0.0.1:8001, 127.0.0.1:8444 ssl
+proxy_listen = 0.0.0.0:8000, 0.0.0.0:8443 http2 ssl
+stream_listen = off
+admin_listen = 127.0.0.1:8001, 127.0.0.1:8444 http2 ssl
+status_listen = off
+origins = NONE
 nginx_user = nobody nobody
 nginx_worker_processes = auto
 nginx_optimizations = on
@@ -34,14 +39,23 @@ client_max_body_size = 0
 client_body_buffer_size = 8k
 error_default_type = text/plain
 
+nginx_http_ssl_protocols = TLSv1.1 TLSv1.2 TLSv1.3
+nginx_http_upstream_keepalive = 60
+nginx_http_upstream_keepalive_requests = 100
+nginx_http_upstream_keepalive_timeout = 60s
+
 database = postgres
 pg_host = 127.0.0.1
 pg_port = 5432
 pg_database = kong
+pg_schema = NONE
+pg_timeout = 5000
 pg_user = kong
 pg_password = NONE
 pg_ssl = off
 pg_ssl_verify = off
+pg_max_concurrent_queries = 0
+pg_semaphore_timeout = 60000
 cassandra_contact_points = 127.0.0.1
 cassandra_port = 9042
 cassandra_keyspace = kong
@@ -51,17 +65,20 @@ cassandra_ssl_verify = off
 cassandra_username = kong
 cassandra_password = NONE
 cassandra_consistency = ONE
-cassandra_lb_policy = RoundRobin
+cassandra_lb_policy = RequestRoundRobin
 cassandra_local_datacenter = NONE
+cassandra_refresh_frequency = 60
 cassandra_repl_strategy = SimpleStrategy
 cassandra_repl_factor = 1
 cassandra_data_centers = dc1:2,dc2:3
 cassandra_schema_consensus_timeout = 10000
+declarative_config = NONE
 
 db_update_frequency = 5
 db_update_propagation = 0
 db_cache_ttl = 0
 db_resurrect_ttl = 30
+db_cache_warmup_entities = services, plugins
 
 dns_resolver = NONE
 dns_hostsfile = /etc/hosts
@@ -71,6 +88,9 @@ dns_stale_ttl = 4
 dns_not_found_ttl = 30
 dns_error_ttl = 1
 dns_no_sync = off
+
+router_consistency = strict
+router_update_frequency = 1
 
 lua_socket_pool_size = 30
 lua_ssl_trusted_certificate = NONE

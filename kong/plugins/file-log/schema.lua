@@ -1,21 +1,18 @@
-local pl_file = require "pl.file"
-local pl_path = require "pl.path"
-
-local function validate_file(value)
-  -- create file in case it doesn't exist
-  if not pl_path.exists(value) then
-    local ok, err = pl_file.write(value, "")
-    if not ok then
-      return false, string.format("Cannot create file: %s", err)
-    end
-  end
-
-  return true
-end
+local typedefs = require "kong.db.schema.typedefs"
 
 return {
+  name = "file-log",
   fields = {
-    path = { required = true, type = "string", func = validate_file },
-    reopen = { type = "boolean", default = false },
+    { protocols = typedefs.protocols_http },
+    { config = {
+        type = "record",
+        fields = {
+          { path = { type = "string",
+                     required = true,
+                     match = [[^[^*&%%\`]+$]],
+                     err = "not a valid filename",
+          }, },
+          { reopen = { type = "boolean", default = false }, },
+    }, }, },
   }
 }

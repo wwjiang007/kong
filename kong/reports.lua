@@ -4,12 +4,18 @@ local constants = require "kong.constants"
 
 
 local kong_dict = ngx.shared.kong
-local udp_sock = ngx.socket.udp
+local ngx = ngx
+local tcp_sock = ngx.socket.tcp
 local timer_at = ngx.timer.at
 local ngx_log = ngx.log
+local var = ngx.var
+local subsystem = ngx.config.subsystem
 local concat = table.concat
 local tostring = tostring
+local lower = string.lower
+local ipairs = ipairs
 local pairs = pairs
+local error = error
 local type = type
 local WARN = ngx.WARN
 local sub = string.sub
@@ -17,7 +23,22 @@ local sub = string.sub
 
 local PING_INTERVAL = 3600
 local PING_KEY = "events:reports"
-local BUFFERED_REQUESTS_COUNT_KEYS = "events:requests"
+
+
+local REQUEST_COUNT_KEY       = "events:requests"
+local HTTP_REQUEST_COUNT_KEY  = "events:requests:http"
+local HTTPS_REQUEST_COUNT_KEY = "events:requests:https"
+local H2C_REQUEST_COUNT_KEY   = "events:requests:h2c"
+local H2_REQUEST_COUNT_KEY    = "events:requests:h2"
+local GRPC_REQUEST_COUNT_KEY  = "events:requests:grpc"
+local GRPCS_REQUEST_COUNT_KEY = "events:requests:grpcs"
+local WS_REQUEST_COUNT_KEY    = "events:requests:ws"
+local WSS_REQUEST_COUNT_KEY   = "events:requests:wss"
+
+
+local STREAM_COUNT_KEY        = "events:streams"
+local TCP_STREAM_COUNT_KEY    = "events:streams:tcp"
+local TLS_STREAM_COUNT_KEY    = "events:streams:tls"
 
 
 local _buffer = {}
@@ -100,25 +121,23 @@ local function send_report(signal_type, t, host, port)
     end
   end
 
-  local sock = udp_sock()
-  local ok, err = sock:setpeername(host, port)
+  local sock = tcp_sock()
+  sock:settimeouts(30000, 30000, 30000)
+
+  local ok, err = sock:connect(host, port)
   if not ok then
-    log(WARN, "could not set peer name for UDP socket: ", err)
+    log(WARN, "could not connect to TCP socket: ", err)
     return
   end
 
-  sock:settimeout(1000)
-
-  -- concat and send buffer
-
-  ok, err = sock:send(concat(_buffer, ";", 1, mutable_idx))
+  local ok, err = sock:send(concat(_buffer, ";", 1, mutable_idx) .. "\n")
   if not ok then
     log(WARN, "could not send data: ", err)
   end
 
-  ok, err = sock:close()
+  ok, err = sock:setkeepalive()
   if not ok then
-    log(WARN, "could not close socket: ", err)
+    log(WARN, "could not setkeepalive socket: ", err)
   end
 end
 
@@ -130,7 +149,7 @@ end
 -- worker processes from sending the test request simultaneously.
 -- Other workers do not need to wait until this lock is released,
 -- and can ignore the event, knowing another worker is handling it.
--- We substract 1ms to the exp time to prevent a race condition
+-- We subtract 1ms to the exp time to prevent a race condition
 -- with the next timer event.
 local function get_lock(key, exptime)
   local ok, err = kong_dict:safe_add(key, true, exptime - 0.001)
@@ -150,6 +169,141 @@ local function create_timer(...)
 end
 
 
+local function get_counter(key)
+  local count, err = kong_dict:get(key)
+  if err then
+    log(WARN, "could not get ", key, " from 'kong' shm: ", err)
+  end
+  return count or 0
+end
+
+-- For counter resetting we use `incr` instead of `set` because we want to
+-- preserve measurements which might get received while we send the
+-- report from worker A:
+--
+--                   Flow of Time
+--                       |||
+--                       VVV
+--
+--         Worker A       |     Worker B
+--                        |
+--   get_counter -> 100   |
+--                        |
+--                        |  <log phase> incr_counter(1) -> 101
+--                        |
+--   reset_counter(-100)  |
+--
+-- Final counter value after reset: 1 (correct, the worker B increment was preserved)
+-- `reset_counter` was set to 0 (with `kong_dict:set(key, 0)` we would lose the increment
+-- done by Worker B.
+local function reset_counter(key, amount)
+  local ok, err = kong_dict:incr(key, -amount, amount)
+  if not ok then
+    log(WARN, "could not reset ", key, " in 'kong' shm: ", err)
+  end
+end
+
+
+local function incr_counter(key)
+  local ok, err = kong_dict:incr(key, 1, 0)
+  if not ok then
+    log(WARN, "could not increment ", key, " in 'kong' shm: ", err)
+  end
+end
+
+
+-- returns a string indicating the "kind" of the current request/stream:
+-- "http", "https", "h2c", "h2", "grpc", "grpcs", "ws", "wss", "tcp", "tls"
+-- or nil + error message if the suffix could not be determined
+local function get_current_suffix()
+  if subsystem == "stream" then
+    if var.ssl_preread_protocol then
+      return "tls"
+    end
+
+    return "tcp"
+  end
+
+  local scheme = var.scheme
+  if scheme == "http" or scheme == "https" then
+    local proxy_mode = var.kong_proxy_mode
+    if proxy_mode == "http" then
+      local http_upgrade = var.http_upgrade
+      if http_upgrade and lower(http_upgrade) == "websocket" then
+        if scheme == "http" then
+          return "ws"
+        end
+
+        return "wss"
+      end
+
+      if ngx.req.http_version() == 2 then
+        if scheme == "http" then
+          return "h2c"
+        end
+
+        return "h2"
+      end
+
+      return scheme
+    end
+
+    if proxy_mode == "grpc" then
+      if scheme == "http" then
+        return "grpc"
+      end
+
+      if scheme == "https" then
+        return "grpcs"
+      end
+    end
+  end
+
+  return nil, "unknown request scheme: " .. tostring(scheme)
+end
+
+
+local function send_ping(host, port)
+  _ping_infos.unique_id = _unique_str
+
+  if subsystem == "stream" then
+    _ping_infos.streams     = get_counter(STREAM_COUNT_KEY)
+    _ping_infos.tcp_streams = get_counter(TCP_STREAM_COUNT_KEY)
+    _ping_infos.tls_streams = get_counter(TLS_STREAM_COUNT_KEY)
+
+    send_report("ping", _ping_infos, host, port)
+
+    reset_counter(STREAM_COUNT_KEY, _ping_infos.streams)
+    reset_counter(TCP_STREAM_COUNT_KEY, _ping_infos.tcp_streams)
+    reset_counter(TLS_STREAM_COUNT_KEY, _ping_infos.tls_streams)
+
+    return
+  end
+
+  _ping_infos.requests   = get_counter(REQUEST_COUNT_KEY)
+  _ping_infos.http_reqs  = get_counter(HTTP_REQUEST_COUNT_KEY)
+  _ping_infos.https_reqs = get_counter(HTTPS_REQUEST_COUNT_KEY)
+  _ping_infos.h2c_reqs   = get_counter(H2C_REQUEST_COUNT_KEY)
+  _ping_infos.h2_reqs    = get_counter(H2_REQUEST_COUNT_KEY)
+  _ping_infos.grpc_reqs  = get_counter(GRPC_REQUEST_COUNT_KEY)
+  _ping_infos.grpcs_reqs = get_counter(GRPCS_REQUEST_COUNT_KEY)
+  _ping_infos.ws_reqs    = get_counter(WS_REQUEST_COUNT_KEY)
+  _ping_infos.wss_reqs   = get_counter(WSS_REQUEST_COUNT_KEY)
+
+  send_report("ping", _ping_infos, host, port)
+
+  reset_counter(REQUEST_COUNT_KEY,       _ping_infos.requests)
+  reset_counter(HTTP_REQUEST_COUNT_KEY,  _ping_infos.http_reqs)
+  reset_counter(HTTPS_REQUEST_COUNT_KEY, _ping_infos.https_reqs)
+  reset_counter(H2C_REQUEST_COUNT_KEY,   _ping_infos.h2c_reqs)
+  reset_counter(H2_REQUEST_COUNT_KEY,    _ping_infos.h2_reqs)
+  reset_counter(GRPC_REQUEST_COUNT_KEY,  _ping_infos.grpc_reqs)
+  reset_counter(GRPCS_REQUEST_COUNT_KEY, _ping_infos.grpcs_reqs)
+  reset_counter(WS_REQUEST_COUNT_KEY,    _ping_infos.ws_reqs)
+  reset_counter(WSS_REQUEST_COUNT_KEY,   _ping_infos.wss_reqs)
+end
+
+
 local function ping_handler(premature)
   if premature then
     return
@@ -163,22 +317,7 @@ local function ping_handler(premature)
     return
   end
 
-  local n_requests, err = kong_dict:get(BUFFERED_REQUESTS_COUNT_KEYS)
-  if err then
-    log(WARN, "could not get buffered requests count from 'kong' shm: ", err)
-  elseif not n_requests then
-    n_requests = 0
-  end
-
-  _ping_infos.requests = n_requests
-  _ping_infos.unique_id = _unique_str
-
-  send_report("ping", _ping_infos)
-
-  local ok, err = kong_dict:incr(BUFFERED_REQUESTS_COUNT_KEYS, -n_requests, n_requests)
-  if not ok then
-    log(WARN, "could not reset buffered requests count in 'kong' shm: ", err)
-  end
+  send_ping()
 end
 
 
@@ -196,13 +335,41 @@ local function add_immutable_value(k, v)
 end
 
 
+local function configure_ping(kong_conf)
+  if type(kong_conf) ~= "table" then
+    error("kong_config must be a table", 2)
+  end
+
+  add_immutable_value("database", kong_conf.database)
+  add_immutable_value("_admin", #kong_conf.admin_listeners > 0 and 1 or 0)
+  add_immutable_value("_proxy", #kong_conf.proxy_listeners > 0 and 1 or 0)
+  add_immutable_value("_stream", #kong_conf.stream_listeners > 0 and 1 or 0)
+  add_immutable_value("_orig", #kong_conf.origins > 0 and 1 or 0)
+
+  local _tip = 0
+
+  for _, property in ipairs({ "proxy_listeners", "stream_listeners" }) do
+    if _tip == 1 then
+      break
+    end
+
+    for i = 1, #kong_conf[property] or {} do
+      if kong_conf[property][i].transparent then
+        _tip = 1
+        break
+      end
+    end
+  end
+
+  add_immutable_value("_tip", _tip)
+end
+
+
 local retrieve_redis_version
 
 
 do
   local _retrieved_redis_version = false
-
-
   retrieve_redis_version = function(red)
     if not _enabled or _retrieved_redis_version then
       return
@@ -242,19 +409,26 @@ return {
     create_timer(PING_INTERVAL, ping_handler)
   end,
   add_immutable_value = add_immutable_value,
+  configure_ping = configure_ping,
   add_ping_value = add_ping_value,
   get_ping_value = function(k)
     return _ping_infos[k]
   end,
+  send_ping = send_ping,
   log = function()
     if not _enabled then
       return
     end
 
-    local ok, err = kong_dict:incr(BUFFERED_REQUESTS_COUNT_KEYS, 1, 0)
-    if not ok then
-      log(WARN, "could not increment buffered requests count in 'kong' shm: ",
-                err)
+    local count_key = subsystem == "stream" and STREAM_COUNT_KEY
+                                             or REQUEST_COUNT_KEY
+
+    incr_counter(count_key)
+    local suffix, err = get_current_suffix()
+    if suffix then
+      incr_counter(count_key .. ":" .. suffix)
+    else
+      log(WARN, err)
     end
   end,
 

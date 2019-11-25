@@ -2,9 +2,9 @@
 -- Module containing some general utility functions used in many places in Kong.
 --
 -- NOTE: Before implementing a function here, consider if it will be used in many places
--- across Kong. If not, a local function in the appropriate module is prefered.
+-- across Kong. If not, a local function in the appropriate module is preferred.
 --
--- @copyright Copyright 2016-2018 Kong Inc. All rights reserved.
+-- @copyright Copyright 2016-2019 Kong Inc. All rights reserved.
 -- @license [Apache 2.0](https://opensource.org/licenses/Apache-2.0)
 -- @module kong.tools.utils
 
@@ -29,7 +29,6 @@ local fmt        = string.format
 local find       = string.find
 local gsub       = string.gsub
 local split      = pl_stringx.split
-local strip      = pl_stringx.strip
 local re_find    = ngx.re.find
 local re_match   = ngx.re.match
 
@@ -61,9 +60,18 @@ local _M = {}
 _M.split = split
 
 --- strips whitespace from a string.
--- just a placeholder to the penlight `pl.stringx.strip` function
 -- @function strip
-_M.strip = strip
+_M.strip = function(str)
+  if str == nil then
+    return ""
+  end
+  str = tostring(str)
+  if #str > 200 then
+    return str:gsub("^%s+", ""):reverse():gsub("^%s+", ""):reverse()
+  else
+    return str:match("^%s*(.-)%s*$")
+  end
+end
 
 --- packs a set of arguments in a table.
 -- Explicitly sets field `n` to the number of arguments, so it is `nil` safe
@@ -114,7 +122,7 @@ do
       _system_infos.cores = tonumber(stdout:sub(1, -2))
     end
 
-    ok, _, stdout = pl_utils.executeex("uname -a")
+    ok, _, stdout = pl_utils.executeex("uname -ms")
     if ok then
       _system_infos.uname = stdout:gsub(";", ","):sub(1, -2)
     end
@@ -262,6 +270,47 @@ do
     end
   end
 
+  local function compare_keys(a, b)
+    local ta = type(a)
+    if ta == type(b) then
+      return a < b
+    end
+    return ta == "number" -- numbers go first, then the rest of keys (usually strings)
+  end
+
+
+  -- Recursively URL escape and format key and value
+  -- Handles nested arrays and tables
+  local function recursive_encode_args(parent_key, value, raw, no_array_indexes, query)
+    local sub_keys = {}
+    for sk in pairs(value) do
+      sub_keys[#sub_keys + 1] = sk
+    end
+    sort(sub_keys, compare_keys)
+
+    local sub_value, next_sub_key
+    for _, sub_key in ipairs(sub_keys) do
+      sub_value = value[sub_key]
+
+      if type(sub_key) == "number" then
+        if no_array_indexes then
+          next_sub_key = parent_key .. "[]"
+        else
+          next_sub_key = ("%s[%s]"):format(parent_key, tostring(sub_key))
+        end
+      else
+        next_sub_key = ("%s.%s"):format(parent_key, tostring(sub_key))
+      end
+
+      if type(sub_value) == "table" then
+        recursive_encode_args(next_sub_key, sub_value, raw, no_array_indexes, query)
+      else
+        query[#query+1] = encode_args_value(next_sub_key, sub_value, raw)
+      end
+    end
+  end
+
+
   --- Encode a Lua table to a querystring
   -- Tries to mimic ngx_lua's `ngx.encode_args`, but has differences:
   -- * It percent-encodes querystring values.
@@ -269,6 +318,10 @@ do
   -- * It encodes arrays like Lapis instead of like ngx.encode_args to allow interacting with Lapis
   -- * It encodes ngx.null as empty strings
   -- * It encodes true and false as "true" and "false"
+  -- * It is capable of encoding nested data structures:
+  --   * An array access is encoded as `arr[1]`
+  --   * A struct access is encoded as `struct.field`
+  --   * Nested structures can use both: `arr[1].field[3]`
   -- @see https://github.com/Mashape/kong/issues/749
   -- @param[type=table] args A key/value table containing the query args to encode.
   -- @param[type=boolean] raw If true, will not percent-encode any key/value and will ignore special boolean rules.
@@ -284,29 +337,12 @@ do
       keys[#keys+1] = k
     end
 
-    sort(keys)
+    sort(keys, compare_keys)
 
     for _, key in ipairs(keys) do
       local value = args[key]
       if type(value) == "table" then
-        for sub_key, sub_value in pairs(value) do
-          if no_array_indexes then
-            query[#query+1] = encode_args_value(key, sub_value, raw)
-
-          else
-            if type(sub_key) == "number" then
-              query[#query+1] = encode_args_value(("%s[%s]")
-                                  :format(key, tostring(sub_key)), sub_value,
-                                          raw)
-
-            else
-              query[#query+1] = encode_args_value(("%s.%s")
-                                  :format(key, tostring(sub_key)), sub_value,
-                                          raw)
-
-            end
-          end
-        end
+        recursive_encode_args(key, value, raw, no_array_indexes, query)
       elseif value == ngx.null then
         query[#query+1] = encode_args_value(key, "")
       elseif  value ~= nil or raw then
@@ -467,15 +503,21 @@ end
 --- Deep copies a table into a new table.
 -- Tables used as keys are also deep copied, as are metatables
 -- @param orig The table to copy
+-- @param copy_mt Copy metatable (default is true)
 -- @return Returns a copy of the input table
-function _M.deep_copy(orig)
+function _M.deep_copy(orig, copy_mt)
+  if copy_mt == nil then
+    copy_mt = true
+  end
   local copy
   if type(orig) == "table" then
     copy = {}
     for orig_key, orig_value in next, orig, nil do
-      copy[_M.deep_copy(orig_key)] = _M.deep_copy(orig_value)
+      copy[_M.deep_copy(orig_key)] = _M.deep_copy(orig_value, copy_mt)
     end
-    setmetatable(copy, _M.deep_copy(getmetatable(orig)))
+    if copy_mt then
+      setmetatable(copy, _M.deep_copy(getmetatable(orig)))
+    end
   else
     copy = orig
   end
@@ -786,7 +828,7 @@ _M.format_host = function(p1, p2)
     return nil, "cannot format type '" .. t .. "'"
   end
   if typ == "ipv6" and not find(host, "[", nil, true) then
-    return "[" .. host .. "]" .. (port and ":" .. port or "")
+    return "[" .. _M.normalize_ipv6(host) .. "]" .. (port and ":" .. port or "")
   else
     return host ..  (port and ":" .. port or "")
   end
@@ -827,5 +869,130 @@ _M.validate_cookie_name = function(name)
   return nil, "bad cookie name '" .. name ..
               "', allowed characters are A-Z, a-z, 0-9, '_', and '-'"
 end
+
+
+---
+-- Given an http status and an optional message, this function will
+-- return a body that could be used in `kong.response.exit`.
+--
+-- * Status 204 will always return nil for the body
+-- * 405, 500 and 502 always return a predefined message
+-- * If there is a message, it will be used as a body
+-- * Otherwise, there's a default body for 401, 404 & 503 responses
+--
+-- If after applying those rules there's a body, and that body isn't a
+-- table, it will be transformed into one of the form `{ message = ... }`,
+-- where `...` is the untransformed body.
+--
+-- This function throws an error on invalid inputs.
+--
+-- @tparam number status The status to be used
+-- @tparam[opt] table|string message The message to be used
+-- @tparam[opt] table headers The headers to be used
+-- @return table|nil a possible body which can be used in kong.response.exit
+-- @usage
+--
+-- --- 204 always returns nil
+-- get_default_exit_body(204) --> nil
+-- get_default_exit_body(204, "foo") --> nil
+--
+-- --- 405, 500 & 502 always return predefined values
+--
+-- get_default_exit_body(502, "ignored") --> { message = "Bad gateway" }
+--
+-- --- If message is a table, it is returned
+--
+-- get_default_exit_body(200, { ok = true }) --> { ok = true }
+--
+-- --- If message is not a table, it is transformed into one
+--
+-- get_default_exit_body(200, "ok") --> { message = "ok" }
+--
+-- --- 401, 404 and 503 provide default values if none is defined
+--
+-- get_default_exit_body(404) --> { message = "Not found" }
+--
+do
+  local _overrides = {
+    [405] = "Method not allowed",
+    [500] = "An unexpected error occurred",
+    [502] = "Bad gateway",
+  }
+
+  local _defaults = {
+    [401] = "Unauthorized",
+    [404] = "Not found",
+    [503] = "Service unavailable",
+  }
+
+  local MIN_STATUS_CODE      = 100
+  local MAX_STATUS_CODE      = 599
+
+  function _M.get_default_exit_body(status, message)
+    if type(status) ~= "number" then
+      error("code must be a number", 2)
+
+    elseif status < MIN_STATUS_CODE or status > MAX_STATUS_CODE then
+      error(fmt("code must be a number between %u and %u", MIN_STATUS_CODE, MAX_STATUS_CODE), 2)
+    end
+
+    if status == 204 then
+      return nil
+    end
+
+    local body = _overrides[status] or message or _defaults[status]
+    if body ~= nil and type(body) ~= "table" then
+      body = { message = body }
+    end
+
+    return body
+  end
+end
+
+
+---
+-- Converts bytes to another unit in a human-readable string.
+-- @tparam number bytes A value in bytes.
+--
+-- @tparam[opt] string unit The unit to convert the bytes into. Can be either
+-- of `b/B`, `k/K`, `m/M`, or `g/G` for bytes (unchanged), kibibytes,
+-- mebibytes, or gibibytes, respectively. Defaults to `b` (bytes).
+-- @tparam[opt] number scale The number of digits to the right of the decimal
+-- point. Defaults to 2.
+-- @treturn string A human-readable string.
+-- @usage
+--
+-- bytes_to_str(5497558) -- "5497558"
+-- bytes_to_str(5497558, "m") -- "5.24 MiB"
+-- bytes_to_str(5497558, "G", 3) -- "5.120 GiB"
+--
+function _M.bytes_to_str(bytes, unit, scale)
+  if not unit or unit == "" or lower(unit) == "b" then
+    return fmt("%d", bytes)
+  end
+
+  scale = scale or 2
+
+  if type(scale) ~= "number" or scale < 0 then
+    error("scale must be equal or greater than 0", 2)
+  end
+
+  local fspec = fmt("%%.%df", scale)
+
+  if lower(unit) == "k" then
+    return fmt(fspec .. " KiB", bytes / 2^10)
+  end
+
+  if lower(unit) == "m" then
+    return fmt(fspec .. " MiB", bytes / 2^20)
+  end
+
+  if lower(unit) == "g" then
+    return fmt(fspec .. " GiB", bytes / 2^30)
+  end
+
+  error("invalid unit '" .. unit .. "' (expected 'k/K', 'm/M', or 'g/G')", 2)
+end
+
 
 return _M

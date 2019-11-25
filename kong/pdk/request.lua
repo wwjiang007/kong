@@ -5,7 +5,7 @@
 -- @module kong.request
 
 
-local cjson = require "cjson.safe"
+local cjson = require "cjson.safe".new()
 local multipart = require "multipart"
 local phase_checker = require "kong.pdk.private.phases"
 
@@ -22,6 +22,9 @@ local check_not_phase = phase_checker.check_not
 
 
 local PHASES = phase_checker.phases
+
+
+cjson.decode_array_with_array_mt(true)
 
 
 local function new(self)
@@ -57,7 +60,7 @@ local function new(self)
   -- normalized to lower-case form.
   --
   -- @function kong.request.get_scheme
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string a string like `"http"` or `"https"`
   -- @usage
   -- -- Given a request to https://example.com:1234/v1/movies
@@ -75,7 +78,7 @@ local function new(self)
   -- "Host" header. The returned value is normalized to lower-case form.
   --
   -- @function kong.request.get_host
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string the host
   -- @usage
   -- -- Given a request to https://example.com:1234/v1/movies
@@ -93,7 +96,7 @@ local function new(self)
   -- as a Lua number.
   --
   -- @function kong.request.get_port
-  -- @phases certificate, rewrite, access, header_filter, body_filter, log
+  -- @phases certificate, rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn number the port
   -- @usage
   -- -- Given a request to https://example.com:1234/v1/movies
@@ -122,7 +125,7 @@ local function new(self)
   -- offered yet since it is not supported by ngx\_http\_realip\_module.
   --
   -- @function kong.request.get_forwarded_scheme
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string the forwarded scheme
   -- @usage
   -- kong.request.get_forwarded_scheme() -- "https"
@@ -157,7 +160,7 @@ local function new(self)
   -- (RFC 7239) since it is not supported by ngx_http_realip_module.
   --
   -- @function kong.request.get_forwarded_host
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string the forwarded host
   -- @usage
   -- kong.request.get_forwarded_host() -- "example.com"
@@ -197,7 +200,7 @@ local function new(self)
   -- (RFC 7239) since it is not supported by ngx_http_realip_module.
   --
   -- @function kong.request.get_forwareded_port
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn number the forwared port
   -- @usage
   -- kong.request.get_forwarded_port() -- 1234
@@ -234,14 +237,14 @@ local function new(self)
 
   ---
   -- Returns the HTTP version used by the client in the request as a Lua
-  -- number, returning values such as `"1.1"` and `"2.0."`, or `nil` for
+  -- number, returning values such as `1`, `1.1`, `2.0`, or `nil` for
   -- unrecognized values.
   --
   -- @function kong.request.get_http_version
-  -- @phases rewrite, access, header_filter, body_filter, log
-  -- @treturn string|nil the http version
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+  -- @treturn number|nil the HTTP version as a Lua number
   -- @usage
-  -- kong.request.get_http_version() -- "1.1"
+  -- kong.request.get_http_version() -- 1.1
   function _REQUEST.get_http_version()
     check_phase(PHASES.request)
 
@@ -254,12 +257,20 @@ local function new(self)
   -- upper-case.
   --
   -- @function kong.request.get_method
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string the request method
   -- @usage
   -- kong.request.get_method() -- "GET"
   function _REQUEST.get_method()
     check_phase(PHASES.request)
+
+    if ngx.ctx.KONG_UNEXPECTED and _REQUEST.get_http_version() < 2 then
+      local req_line = ngx.var.request
+      local idx = find(req_line, " ", 1, true)
+      if idx then
+        return sub(req_line, 1, idx - 1)
+      end
+    end
 
     return ngx.req.get_method()
   end
@@ -270,7 +281,7 @@ local function new(self)
   -- any way and does not include the querystring.
   --
   -- @function kong.request.get_path
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string the path
   -- @usage
   -- -- Given a request to https://example.com:1234/v1/movies?movie=foo
@@ -279,9 +290,26 @@ local function new(self)
   function _REQUEST.get_path()
     check_phase(PHASES.request)
 
-    local uri = ngx.var.request_uri
+    local uri = ngx.var.request_uri or ""
     local s = find(uri, "?", 2, true)
     return s and sub(uri, 1, s - 1) or uri
+  end
+
+
+  ---
+  -- Returns the path, including the querystring if any. No
+  -- transformations/normalizations are done.
+  --
+  -- @function kong.request.get_path_with_query
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+  -- @treturn string the path with the querystring
+  -- @usage
+  -- -- Given a request to https://example.com:1234/v1/movies?movie=foo
+  --
+  -- kong.request.get_path_with_query() -- "/v1/movies?movie=foo"
+  function _REQUEST.get_path_with_query()
+    check_phase(PHASES.request)
+    return ngx.var.request_uri or ""
   end
 
 
@@ -291,7 +319,7 @@ local function new(self)
   -- include the leading `?` character.
   --
   -- @function kong.request.get_raw_query
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @return string the query component of the request's URL
   -- @usage
   -- -- Given a request to https://example.com/foo?msg=hello%20world&bla=&bar
@@ -316,7 +344,7 @@ local function new(self)
   -- querystring, this function will return the value of the first occurrence.
   --
   -- @function kong.request.get_query_arg
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @treturn string|boolean|nil the value of the argument
   -- @usage
   -- -- Given a request GET /test?foo=hello%20world&bar=baz&zzz&blo=&bar=bla&bar
@@ -357,7 +385,7 @@ local function new(self)
   -- greater than **1** and not greater than **1000**.
   --
   -- @function kong.request.get_query
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @tparam[opt] number max_args set a limit on the maximum number of parsed
   -- arguments
   -- @treturn table A table representation of the query string
@@ -377,19 +405,36 @@ local function new(self)
     check_phase(PHASES.request)
 
     if max_args == nil then
-      return ngx.req.get_uri_args(MAX_QUERY_ARGS_DEFAULT)
+      max_args = MAX_QUERY_ARGS_DEFAULT
+
+    else
+      if type(max_args) ~= "number" then
+        error("max_args must be a number", 2)
+      end
+
+      if max_args < MIN_QUERY_ARGS then
+        error("max_args must be >= " .. MIN_QUERY_ARGS, 2)
+      end
+
+      if max_args > MAX_QUERY_ARGS then
+        error("max_args must be <= " .. MAX_QUERY_ARGS, 2)
+      end
     end
 
-    if type(max_args) ~= "number" then
-      error("max_args must be a number", 2)
-    end
+    if ngx.ctx.KONG_UNEXPECTED and _REQUEST.get_http_version() < 2 then
+      local req_line = ngx.var.request
+      local qidx = find(req_line, "?", 1, true)
+      if not qidx then
+        return {}
+      end
 
-    if max_args < MIN_QUERY_ARGS then
-      error("max_args must be >= " .. MIN_QUERY_ARGS, 2)
-    end
+      local eidx = find(req_line, " ", qidx + 1, true)
+      if not eidx then
+        -- HTTP 414, req_line is too long
+        return {}
+      end
 
-    if max_args > MAX_QUERY_ARGS then
-      error("max_args must be <= " .. MAX_QUERY_ARGS, 2)
+      return ngx.decode_args(sub(req_line, qidx + 1, eidx - 1), max_args)
     end
 
     return ngx.req.get_uri_args(max_args)
@@ -409,9 +454,9 @@ local function new(self)
   -- `X-Custom-Header` can also be retrieved as `x_custom_header`.
   --
   -- @function kong.request.get_header
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @tparam string name the name of the header to be returned
-  -- @treturn string the value of the header
+  -- @treturn string|nil the value of the header or nil if not present
   -- @usage
   -- -- Given a request with the following headers:
   --
@@ -452,7 +497,7 @@ local function new(self)
   -- be greater than **1** and not greater than **1000**.
   --
   -- @function kong.request.get_headers
-  -- @phases rewrite, access, header_filter, body_filter, log
+  -- @phases rewrite, access, header_filter, body_filter, log, admin_api
   -- @tparam[opt] number max_headers set a limit on the maximum number of
   -- parsed headers
   -- @treturn table the request headers in table form
@@ -490,7 +535,7 @@ local function new(self)
   end
 
 
-  local before_content = phase_checker.new(PHASES.rewrite, PHASES.access)
+  local before_content = phase_checker.new(PHASES.rewrite, PHASES.access, PHASES.admin_api)
 
 
   ---
@@ -503,12 +548,12 @@ local function new(self)
   -- message explaining this limitation.
   --
   -- @function kong.request.get_raw_body
-  -- @phases rewrite, access
+  -- @phases rewrite, access, admin_api
   -- @treturn string the plain request body
   -- @usage
   -- -- Given a body with payload "Hello, Earth!":
   --
-  -- kong.request.get_raw_body():gsub("Earth", Mars") -- "Hello, Mars!"
+  -- kong.request.get_raw_body():gsub("Earth", "Mars") -- "Hello, Mars!"
   function _REQUEST.get_raw_body()
     check_phase(before_content)
 
@@ -562,7 +607,7 @@ local function new(self)
   -- what MIME type the body was parsed as.
   --
   -- @function kong.request.get_body
-  -- @phases rewrite, access
+  -- @phases rewrite, access, admin_api
   -- @tparam[opt] string mimetype the MIME type
   -- @tparam[opt] number max_args set a limit on the maximum number of parsed
   -- arguments
@@ -618,9 +663,8 @@ local function new(self)
         return nil, err, CONTENT_TYPE_JSON
       end
 
-      -- TODO: cjson.decode_array_with_array_mt(true) (?)
       local json = cjson.decode(body)
-      if not json then
+      if type(json) ~= "table" then
         return nil, "invalid json body", CONTENT_TYPE_JSON
       end
 

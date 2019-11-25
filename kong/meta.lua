@@ -1,8 +1,8 @@
 local version = setmetatable({
-  major = 0,
-  minor = 14,
-  patch = 1,
-  --suffix = ""
+  major = 1,
+  minor = 4,
+  patch = 0,
+  -- suffix = "",
 }, {
   __tostring = function(t)
     return string.format("%d.%d.%d%s", t.major, t.minor, t.patch,
@@ -18,6 +18,6 @@ return {
   -- third-party dependencies' required version, as they would be specified
   -- to lua-version's `set()` in the form {from, to}
   _DEPENDENCIES = {
-    nginx = {"1.13.6.2"},
+    nginx = { "1.15.8.1", "1.15.8.2" },
   }
 }

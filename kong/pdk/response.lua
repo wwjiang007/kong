@@ -21,15 +21,19 @@ local phase_checker = require "kong.pdk.private.phases"
 local ngx = ngx
 local fmt = string.format
 local type = type
+local find = string.find
 local error = error
 local pairs = pairs
-local insert = table.insert
 local coroutine = coroutine
 local normalize_header = checks.normalize_header
 local normalize_multi_header = checks.normalize_multi_header
 local validate_header = checks.validate_header
 local validate_headers = checks.validate_headers
 local check_phase = phase_checker.check
+local add_header
+if ngx and ngx.config.subsystem == "http" then
+  add_header = require("ngx.resp").add_header
+end
 
 
 local PHASES = phase_checker.phases
@@ -37,17 +41,20 @@ local PHASES = phase_checker.phases
 
 local header_body_log = phase_checker.new(PHASES.header_filter,
                                           PHASES.body_filter,
-                                          PHASES.log)
+                                          PHASES.log,
+                                          PHASES.admin_api)
 
 local rewrite_access = phase_checker.new(PHASES.rewrite,
-                                         PHASES.access)
+                                         PHASES.access,
+                                         PHASES.admin_api)
 
 local rewrite_access_header = phase_checker.new(PHASES.rewrite,
                                                 PHASES.access,
-                                                PHASES.header_filter)
+                                                PHASES.header_filter,
+                                                PHASES.admin_api)
 
 
-local function new(pdk, major_version)
+local function new(self, major_version)
   local _RESPONSE = {}
 
   local MIN_HEADERS          = 1
@@ -60,16 +67,56 @@ local function new(pdk, major_version)
   local SERVER_HEADER_NAME   = "Server"
   local SERVER_HEADER_VALUE  = meta._NAME .. "/" .. meta._VERSION
 
+  local GRPC_STATUS_UNKNOWN  = 2
+  local GRPC_STATUS_NAME     = "grpc-status"
+  local GRPC_MESSAGE_NAME    = "grpc-message"
+
   local CONTENT_LENGTH_NAME  = "Content-Length"
   local CONTENT_TYPE_NAME    = "Content-Type"
   local CONTENT_TYPE_JSON    = "application/json; charset=utf-8"
+  local CONTENT_TYPE_GRPC    = "application/grpc"
+
+  local HTTP_TO_GRPC_STATUS = {
+    [200] = 0,
+    [400] = 3,
+    [401] = 16,
+    [403] = 7,
+    [404] = 5,
+    [409] = 6,
+    [429] = 8,
+    [499] = 1,
+    [500] = 13,
+    [501] = 12,
+    [503] = 14,
+    [504] = 4,
+  }
+
+  local GRPC_MESSAGES = {
+    [0]  = "OK",
+    [1]  = "Canceled",
+    [2]  = "Unknown",
+    [3]  = "InvalidArgument",
+    [4]  = "DeadlineExceeded",
+    [5]  = "NotFound",
+    [6]  = "AlreadyExists",
+    [7]  = "PermissionDenied",
+    [8]  = "ResourceExhausted",
+    [9]  = "FailedPrecondition",
+    [10] = "Aborted",
+    [11] = "OutOfRange",
+    [12] = "Unimplemented",
+    [13] = "Internal",
+    [14] = "Unavailable",
+    [15] = "DataLoss",
+    [16] = "Unauthenticated",
+  }
 
 
   ---
   -- Returns the HTTP status code currently set for the downstream response (as
   -- a Lua number).
   --
-  -- If the request was proxied (as per `kong.service.get_source()`), the
+  -- If the request was proxied (as per `kong.response.get_source()`), the
   -- return value will be that of the response from the Service (identical to
   -- `kong.service.response.get_status()`).
   --
@@ -78,7 +125,7 @@ local function new(pdk, major_version)
   -- returned as-is.
   --
   -- @function kong.response.get_status
-  -- @phases header_filter, body_filter, log
+  -- @phases header_filter, body_filter, log, admin_api
   -- @treturn number status The HTTP status code currently set for the
   -- downstream response
   -- @usage
@@ -104,7 +151,7 @@ local function new(pdk, major_version)
   -- of the first occurrence of this header.
   --
   -- @function kong.response.get_header
-  -- @phases header_filter, body_filter, log
+  -- @phases header_filter, body_filter, log, admin_api
   -- @tparam string name The name of the header
   --
   -- Header names are case-insensitive and dashes (`-`) can be written as
@@ -159,7 +206,7 @@ local function new(pdk, major_version)
   -- be greater than **1** and not greater than **1000**.
   --
   -- @function kong.response.get_headers
-  -- @phases header_filter, body_filter, log
+  -- @phases header_filter, body_filter, log, admin_api
   -- @tparam[opt] number max_headers Limits how many headers are parsed
   -- @treturn table headers A table representation of the headers in the
   -- response
@@ -217,7 +264,7 @@ local function new(pdk, major_version)
   --   contacting the proxied Service.
   --
   -- @function kong.response.get_source
-  -- @phases header_filter, body_filter, log
+  -- @phases header_filter, body_filter, log, admin_api
   -- @treturn string the source.
   -- @usage
   -- if kong.response.get_source() == "service" then
@@ -230,12 +277,18 @@ local function new(pdk, major_version)
   function _RESPONSE.get_source()
     check_phase(header_body_log)
 
-    if ngx.ctx.KONG_PROXIED then
-      return "service"
+    local ctx = ngx.ctx
+
+    if ctx.KONG_UNEXPECTED then
+      return "error"
     end
 
-    if ngx.ctx.KONG_EXITED then
+    if ctx.KONG_EXITED then
       return "exit"
+    end
+
+    if ctx.KONG_PROXIED then
+      return "service"
     end
 
     return "error"
@@ -250,7 +303,7 @@ local function new(pdk, major_version)
   -- preparing headers to be sent back to the client.
   --
   -- @function kong.response.set_status
-  -- @phases rewrite, access, header_filter
+  -- @phases rewrite, access, header_filter, admin_api
   -- @tparam number status The new status
   -- @return Nothing; throws an error on invalid input.
   -- @usage
@@ -284,7 +337,7 @@ local function new(pdk, major_version)
   -- This function should be used in the `header_filter` phase, as Kong is
   -- preparing headers to be sent back to the client.
   -- @function kong.response.set_header
-  -- @phases rewrite, access, header_filter
+  -- @phases rewrite, access, header_filter, admin_api
   -- @tparam string name The name of the header
   -- @tparam string|number|boolean value The new value for the header
   -- @return Nothing; throws an error on invalid input.
@@ -314,7 +367,7 @@ local function new(pdk, major_version)
   -- This function should be used in the `header_filter` phase, as Kong is
   -- preparing headers to be sent back to the client.
   -- @function kong.response.add_header
-  -- @phases rewrite, access, header_filter
+  -- @phases rewrite, access, header_filter, admin_api
   -- @tparam string name The header name
   -- @tparam string|number|boolean value The header value
   -- @return Nothing; throws an error on invalid input.
@@ -322,6 +375,9 @@ local function new(pdk, major_version)
   -- kong.response.add_header("Cache-Control", "no-cache")
   -- kong.response.add_header("Cache-Control", "no-store")
   function _RESPONSE.add_header(name, value)
+    -- stream subsystem would been stopped by the phase checker below
+    -- therefore the nil reference to add_header will never have chance
+    -- to show
     check_phase(rewrite_access_header)
 
     if ngx.headers_sent then
@@ -330,14 +386,7 @@ local function new(pdk, major_version)
 
     validate_header(name, value)
 
-    local new_value = _RESPONSE.get_headers()[name]
-    if type(new_value) ~= "table" then
-      new_value = { new_value }
-    end
-
-    insert(new_value, normalize_header(value))
-
-    ngx.header[name] = new_value
+    add_header(name, normalize_header(value))
   end
 
 
@@ -349,7 +398,7 @@ local function new(pdk, major_version)
   -- preparing headers to be sent back to the client.
   --
   -- @function kong.response.clear_header
-  -- @phases rewrite, access, header_filter
+  -- @phases rewrite, access, header_filter, admin_api
   -- @tparam string name The name of the header to be cleared
   -- @return Nothing; throws an error on invalid input.
   -- @usage
@@ -390,7 +439,7 @@ local function new(pdk, major_version)
   -- specified in the `headers` argument. Other headers remain unchanged.
   --
   -- @function kong.response.set_headers
-  -- @phases rewrite, access, header_filter
+  -- @phases rewrite, access, header_filter, admin_api
   -- @tparam table headers
   -- @return Nothing; throws an error on invalid input.
   -- @usage
@@ -436,21 +485,70 @@ local function new(pdk, major_version)
       error("headers have already been sent", 2)
     end
 
-    local json
-    if type(body) == "table" then
-      local err
-      json, err = cjson.encode(body)
-      if err then
-        return nil, err
-      end
-    end
-
     ngx.status = status
-    ngx.header[SERVER_HEADER_NAME] = SERVER_HEADER_VALUE
+
+    if self.ctx.core.phase == phase_checker.phases.admin_api then
+      ngx.header[SERVER_HEADER_NAME] = SERVER_HEADER_VALUE
+    end
 
     if headers ~= nil then
       for name, value in pairs(headers) do
         ngx.header[name] = normalize_multi_header(value)
+      end
+    end
+
+    local res_ctype = ngx.header[CONTENT_TYPE_NAME]
+    local req_ctype = ngx.var.content_type
+
+    local is_grpc
+    local is_grpc_output
+    if res_ctype then
+      is_grpc = find(res_ctype, CONTENT_TYPE_GRPC, 1, true) == 1
+      is_grpc_output = is_grpc
+    elseif req_ctype then
+      is_grpc = find(req_ctype, CONTENT_TYPE_GRPC, 1, true) == 1
+                  and ngx.req.http_version() == "2"
+    end
+
+    local grpc_status
+    if is_grpc and not ngx.header[GRPC_STATUS_NAME] then
+      grpc_status = HTTP_TO_GRPC_STATUS[status]
+      if not grpc_status then
+        if status >= 500 and status <= 599 then
+          grpc_status = HTTP_TO_GRPC_STATUS[500]
+        elseif status >= 400 and status <= 499 then
+          grpc_status = HTTP_TO_GRPC_STATUS[400]
+        elseif status >= 200 and status <= 299 then
+          grpc_status = HTTP_TO_GRPC_STATUS[200]
+        else
+          grpc_status = GRPC_STATUS_UNKNOWN
+        end
+      end
+
+      ngx.header[GRPC_STATUS_NAME] = grpc_status
+    end
+
+    local json
+    if type(body) == "table" then
+      if is_grpc then
+        if is_grpc_output then
+          error("table body encoding with gRPC is not supported", 2)
+
+        elseif type(body.message) == "string" then
+          body = body.message
+
+        else
+          self.log.warn("body was removed because table body encoding with " ..
+                        "gRPC is not supported")
+          body = nil
+        end
+
+      else
+        local err
+        json, err = cjson.encode(body)
+        if err then
+          return nil, err
+        end
       end
     end
 
@@ -460,11 +558,30 @@ local function new(pdk, major_version)
       ngx.print(json)
 
     elseif body ~= nil then
-      ngx.header[CONTENT_LENGTH_NAME] = #body
-      ngx.print(body)
+      if is_grpc and not is_grpc_output then
+        ngx.header[CONTENT_LENGTH_NAME] = 0
+        ngx.header[GRPC_MESSAGE_NAME] = body
+
+        ngx.print() -- avoid default content
+
+      else
+        ngx.header[CONTENT_LENGTH_NAME] = #body
+        if grpc_status and not ngx.header[GRPC_MESSAGE_NAME] then
+          ngx.header[GRPC_MESSAGE_NAME] = GRPC_MESSAGES[grpc_status]
+        end
+
+        ngx.print(body)
+      end
 
     else
       ngx.header[CONTENT_LENGTH_NAME] = 0
+      if grpc_status and not ngx.header[GRPC_MESSAGE_NAME] then
+        ngx.header[GRPC_MESSAGE_NAME] = GRPC_MESSAGES[grpc_status]
+      end
+
+      if is_grpc then
+        ngx.print() -- avoid default content
+      end
     end
 
     return ngx.exit(status)
@@ -508,7 +625,12 @@ local function new(pdk, major_version)
   -- as-is.  It is the caller's responsibility to set the appropriate
   -- Content-Type header via the third argument.  As a convenience, `body` can
   -- be specified as a table; in which case, it will be JSON-encoded and the
-  -- `application/json` Content-Type header will be set.
+  -- `application/json` Content-Type header will be set. On gRPC we cannot send
+  -- the `body` with this function at the moment at least, so what it does
+  -- instead is that it sends "body" in `grpc-message` header instead. If the
+  -- body is a table it looks for a field `message` in it, and uses that as a
+  -- `grpc-message` header. Though, if you have specified `Content-Type` header
+  -- starting with `application/grpc`, the body will be sent.
   --
   -- The third, optional, `headers` argument can be a table specifying response
   -- headers to send. If specified, its behavior is similar to
@@ -517,7 +639,7 @@ local function new(pdk, major_version)
   -- Unless manually specified, this method will automatically set the
   -- Content-Length header in the produced response for convenience.
   -- @function kong.response.exit
-  -- @phases rewrite, access
+  -- @phases rewrite, access, admin_api, header_filter (only if `body` is nil)
   -- @tparam number status The status to be used
   -- @tparam[opt] table|string body The body to be used
   -- @tparam[opt] table headers The headers to be used
@@ -541,7 +663,11 @@ local function new(pdk, major_version)
   --   ["WWW-Authenticate"] = "Basic"
   -- })
   function _RESPONSE.exit(status, body, headers)
-    check_phase(rewrite_access)
+    if body == nil then
+      check_phase(rewrite_access_header)
+    else
+      check_phase(rewrite_access)
+    end
 
     if ngx.headers_sent then
       error("headers have already been sent", 2)
