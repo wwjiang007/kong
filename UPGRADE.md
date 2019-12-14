@@ -88,7 +88,7 @@ The migrations are designed so that there is no need to fully copy
 the data, but this also means that they are designed in such a way so that
 the new version of Kong is able to use the data as it is migrated, and to do
 it in a way so that the old Kong cluster keeps working until it is finally
-time to decomission it. For this reason, the full migration is now split into
+time to decommission it. For this reason, the full migration is now split into
 two steps, which are performed via commands `kong migrations up` (which does
 only non-destructive operations) and `kong migrations finish` (which puts the
 database in the final expected state for Kong 1.4.0).
@@ -435,7 +435,7 @@ The migrations are designed so that there is no need to fully copy
 the data, but this also means that they are designed in such a way so that
 the new version of Kong is able to use the data as it is migrated, and to do
 it in a way so that the old Kong cluster keeps working until it is finally
-time to decomission it. For this reason, the full migration is now split into
+time to decommission it. For this reason, the full migration is now split into
 two steps, which are performed via commands `kong migrations up` (which does
 only non-destructive operations) and `kong migrations finish` (which puts the
 database in the final expected state for Kong 1.2).
@@ -530,7 +530,7 @@ The migrations are designed so that there is no need to fully copy
 the data, but this also means that they are designed in such a way so that
 the new version of Kong is able to use the data as it is migrated, and to do
 it in a way so that the old Kong cluster keeps working until it is finally
-time to decomission it. For this reason, the full migration is now split into
+time to decommission it. For this reason, the full migration is now split into
 two steps, which are performed via commands `kong migrations up` (which does
 only non-destructive operations) and `kong migrations finish` (which puts the
 database in the final expected state for Kong 1.1).
@@ -735,7 +735,7 @@ plugins is now removed.
 - With the removal of the API entity, the `/apis` endpoint
   is removed; accordingly, other endpoints that accepted
   `api_id` no longer do so. Use Routes and Services instead.
-- All entity endpoints now use the new Admin API implementaion.
+- All entity endpoints now use the new Admin API implementation.
   This means their requests and responses now use the same
   syntax, which was already in use in endpoints such as
   `/routes` and `/services`.
@@ -801,7 +801,7 @@ The migrations are designed so that there is no need to fully copy
 the data, but this also means that they are designed in such a way so that
 the new version of Kong is able to use the data as it is migrated, and to do
 it in a way so that the old Kong cluster keeps working until it is finally
-time to decomission it. For this reason, the full migration is now split into
+time to decommission it. For this reason, the full migration is now split into
 two steps, which are performed via commands `kong migrations up` (which does
 only non-destructive operations) and `kong migrations finish` (which puts the
 database in the final expected state for Kong 1.0).
@@ -974,7 +974,7 @@ functionality which was possibly used by custom plugins is now removed.
 
 ##### Admin API
 
-- All entity endpoints now use the new Admin API implementaion.
+- All entity endpoints now use the new Admin API implementation.
   This means their requests and responses now use the same
   syntax, which was already in use in endpoints such as
   `/routes` and `/services`.
