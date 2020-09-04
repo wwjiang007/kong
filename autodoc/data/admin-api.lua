@@ -16,6 +16,7 @@ return {
       "kong/api/routes/health.lua",
       "kong/api/routes/config.lua",
       "kong/api/routes/tags.lua",
+      "kong/api/routes/clustering.lua",
     },
     nodoc_files = {
       "kong/api/routes/cache.lua", -- FIXME should we document this?
@@ -65,17 +66,7 @@ return {
     }, {
       title = [[Supported Content Types]],
       text = [[
-        The Admin API accepts 2 content types on every endpoint:
-
-        - **application/x-www-form-urlencoded**
-
-        Simple enough for basic request bodies, you will probably use it most of the time.
-        Note that when sending nested values, Kong expects nested objects to be referenced
-        with dotted keys. Example:
-
-        ```
-        config.limit=10&config.period=seconds
-        ```
+        The Admin API accepts 3 content types on every endpoint:
 
         - **application/json**
 
@@ -89,6 +80,70 @@ return {
                 "period": "seconds"
             }
         }
+        ```
+
+        An example adding a Route to a Service named `test-service`:
+
+        ```
+        curl -i -X POST http://localhost:8001/services/test-service/routes \
+             -H "Content-Type: application/json" \
+             -d '{"name": "test-route", "paths": [ "/path/one", "/path/two" ]}'
+        ```
+
+        - **application/x-www-form-urlencoded**
+
+        Simple enough for basic request bodies, you will probably use it most of the time.
+        Note that when sending nested values, Kong expects nested objects to be referenced
+        with dotted keys. Example:
+
+        ```
+        config.limit=10&config.period=seconds
+        ```
+
+        When specifying arrays, send the values in order, or use square brackets (numbering
+        inside the brackets is optional but if provided it must be 1-indexed, and
+        consecutive). An example Route added to a Service named `test-service`:
+
+        ```
+        curl -i -X POST http://localhost:8001/services/test-service/routes \
+             -d "name=test-route" \
+             -d "paths[1]=/path/one" \
+             -d "paths[2]=/path/two"
+        ```
+
+        The following two examples are identical to the one above, but less explicit:
+        ```
+        curl -i -X POST http://localhost:8001/services/test-service/routes \
+             -d "name=test-route" \
+             -d "paths[]=/path/one" \
+             -d "paths[]=/path/two"
+
+        curl -i -X POST http://localhost:8001/services/test-service/routes \
+            -d "name=test-route" \
+            -d "paths=/path/one" \
+            -d "paths=/path/two"
+        ```
+
+
+        - **multipart/form-data**
+
+        Similar to URL-encoded, this content type uses dotted keys to reference nested
+        objects. Here is an example of sending a Lua file to the pre-function Kong plugin:
+
+        ```
+        curl -i -X POST http://localhost:8001/services/plugin-testing/plugins \
+             -F "name=pre-function" \
+             -F "config.access=@custom-auth.lua"
+        ```
+
+        When specifying arrays for this content-type, the array indices must be specified.
+        An example Route added to a Service named `test-service`:
+
+        ```
+        curl -i -X POST http://localhost:8001/services/test-service/routes \
+             -F "name=test-route" \
+             -F "paths[1]=/path/one" \
+             -F "paths[2]=/path/two"
         ```
       ]]
     },
@@ -146,6 +201,136 @@ return {
             * `enabled_in_cluster`: Names of plugins that are enabled/configured.
               That is, the plugins configurations currently in the datastore shared
               by all Kong nodes.
+          ]],
+        },
+      },
+      ["/endpoints"] = {
+        GET = {
+          title = [[List available endpoints]],
+          endpoint = [[<div class="endpoint get">/endpoints</div>]],
+          description = [[List all available endpoints provided by the Admin API.]],
+          response =[[
+            ```
+            HTTP 200 OK
+            ```
+
+            ```json
+            {
+                "data": [
+                    "/",
+                    "/acls",
+                    "/acls/{acls}",
+                    "/acls/{acls}/consumer",
+                    "/basic-auths",
+                    "/basic-auths/{basicauth_credentials}",
+                    "/basic-auths/{basicauth_credentials}/consumer",
+                    "/ca_certificates",
+                    "/ca_certificates/{ca_certificates}",
+                    "/cache",
+                    "/cache/{key}",
+                    "..."
+                ]
+            }
+            ```
+          ]],
+        },
+      },
+      ["/schemas/:db_entity_name/validate"] = {
+        POST = {
+          title = [[Validate a configuration against a schema]],
+          endpoint = [[<div class="endpoint post">/schemas/{entity}/validate</div>]],
+          description = [[
+            Check validity of a configuration against its entity schema.
+            This allows you to test your input before submitting a request
+            to the entity endpoints of the Admin API.
+
+            Note that this only performs the schema validation checks,
+            checking that the input configuration is well-formed.
+            A requests to the entity endpoint using the given configuration
+            may still fail due to other reasons, such as invalid foreign
+            key relationships or uniqueness check failures against the
+            contents of the data store.
+          ]],
+          response =[[
+            ```
+            HTTP 200 OK
+            ```
+
+            ```json
+            {
+                "message": "schema validation successful"
+            }
+            ```
+          ]],
+        },
+      },
+      ["/schemas/:name"] = {
+        GET = {
+          title = [[Retrieve Entity Schema]],
+          endpoint = [[<div class="endpoint get">/schemas/{entity name}</div>]],
+          description = [[
+            Retrieve the schema of an entity. This is useful to
+            understand what fields an entity accepts, and can be used for building
+            third-party integrations to the Kong.
+          ]],
+          response = [[
+            ```
+            HTTP 200 OK
+            ```
+
+            ```json
+            {
+                "fields": [
+                    {
+                        "id": {
+                            "auto": true,
+                            "type": "string",
+                            "uuid": true
+                        }
+                    },
+                    {
+                        "created_at": {
+                            "auto": true,
+                            "timestamp": true,
+                            "type": "integer"
+                        }
+                    },
+                    ...
+                ]
+            }
+            ```
+          ]],
+        },
+      },
+      ["/schemas/plugins/:name"] = {
+        GET = {
+          title = [[Retrieve Plugin Schema]],
+          endpoint = [[<div class="endpoint get">/schemas/plugins/{plugin name}</div>]],
+          description = [[
+            Retrieve the schema of a plugin's configuration. This is useful to
+            understand what fields a plugin accepts, and can be used for building
+            third-party integrations to the Kong's plugin system.
+          ]],
+          response = [[
+            ```
+            HTTP 200 OK
+            ```
+
+            ```json
+            {
+                "fields": {
+                    "hide_credentials": {
+                        "default": false,
+                        "type": "boolean"
+                    },
+                    "key_names": {
+                        "default": "function",
+                        "required": true,
+                        "type": "array"
+                    }
+                }
+            }
+            ```
           ]],
         },
       },
@@ -260,6 +445,9 @@ return {
     config = {
       skip = true,
     },
+    clustering = {
+      skip = true,
+    },
     tags = {
       title = [[ Tags ]],
       description = [[
@@ -343,8 +531,8 @@ return {
                     },
                     ...
                   ],
-                  "offset" = "c47139f3-d780-483d-8a97-17e9adc5a7ab",
-                  "next" = "/tags?offset=c47139f3-d780-483d-8a97-17e9adc5a7ab",
+                  "offset": "c47139f3-d780-483d-8a97-17e9adc5a7ab",
+                  "next": "/tags?offset=c47139f3-d780-483d-8a97-17e9adc5a7ab",
                 }
             }
             ```
@@ -355,7 +543,7 @@ return {
       ["/tags/:tags"] = {
         GET = {
           title = [[ List entity IDs by tag ]],
-          endpoint = [[<div class="endpoint get">/tags/:tags</div>]],
+          endpoint = [[<div class="endpoint get">/tags/{tags}</div>]],
           description = [[
             Returns the entities that have been tagged with the specified tag.
 
@@ -381,8 +569,8 @@ return {
                     },
                     ...
                   ],
-                  "offset" = "1fb491c4-f4a7-4bca-aeba-7f3bcee4d2f9",
-                  "next" = "/tags/example?offset=1fb491c4-f4a7-4bca-aeba-7f3bcee4d2f9",
+                  "offset": "1fb491c4-f4a7-4bca-aeba-7f3bcee4d2f9",
+                  "next": "/tags/example?offset=1fb491c4-f4a7-4bca-aeba-7f3bcee4d2f9",
                 }
             }
             ```
@@ -428,7 +616,6 @@ return {
         protocol = {
           description = [[
             The protocol used to communicate with the upstream.
-            It can be one of `http` or `https`.
           ]]
         },
         host = {
@@ -472,9 +659,35 @@ return {
             to the upstream server.
           ]],
         },
+        tls_verify = {
+          description = [[
+            Whether to enable verification of upstream server TLS certificate.
+            If set to `null`, then the Nginx default is respected.
+          ]],
+          example = true,
+        },
+        tls_verify_depth = {
+          description = [[
+            Maximum depth of chain while verifying Upstream server's TLS certificate.
+            If set to `null`, then the Nginx default is respected.
+          ]],
+        },
+        ca_certificates = {
+          description = [[
+            Array of `CA Certificate` object UUIDs that are used to build the trust store
+            while verifying upstream server's TLS certificate.
+            If set to `null` when Nginx default is respected. If default CA list in Nginx
+            are not specified and TLS verification is enabled, then handshake with upstream
+            server will always fail (because no CA are trusted).
+          ]],
+          example = {
+            "4e3ad2e4-0bc4-4638-8e34-c84a417ba39b",
+            "51e77dc2-8f3e-4afa-9d0e-0e3bbbcfd515",
+          }
+        },
         tags = {
           description = [[
-            An optional set of strings associated with the Service, for grouping and filtering.
+            An optional set of strings associated with the Service for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -488,7 +701,7 @@ return {
           description = [[
             Shorthand attribute to set `protocol`, `host`, `port` and `path`
             at once. This attribute is write-only (the Admin API never
-            "returns" the url).
+            returns the URL).
           ]]
         } },
       }
@@ -517,6 +730,34 @@ return {
         * For `tls`, at least one of `sources`, `destinations` or `snis`;
         * For `grpc`, at least one of `hosts`, `headers` or `paths`;
         * For `grpcs`, at least one of `hosts`, `headers`, `paths` or `snis`.
+
+        #### Path handling algorithms
+
+        `"v0"` is the behavior used in Kong 0.x and 2.x. It treats `service.path`, `route.path` and request path as
+        *segments* of a URL. It will always join them via slashes. Given a service path `/s`, route path `/r`
+        and request path `/re`, the concatenated path will be `/s/re`. If the resulting path is a single slash,
+        no further transformation is done to it. If it's longer, then the trailing slash is removed.
+
+        `"v1"` is the behavior used in Kong 1.x. It treats `service.path` as a *prefix*, and ignores the initial
+        slashes of the request and route paths. Given service path `/s`, route path `/r` and request path `/re`,
+        the concatenated path will be `/sre`.
+
+        Both versions of the algorithm detect "double slashes" when combining paths, replacing them by single
+        slashes.
+
+        In the following table, `s` is the Service and `r` is the Route.
+
+        | `s.path` | `r.path` | `r.strip_path` | `r.path_handling` | request path | proxied path  |
+        |----------|----------|----------------|-------------------|--------------|---------------|
+        | `/s`     | `/fv0`   | `false`        | `v0`              | `/fv0req`    | `/s/fv0req`   |
+        | `/s`     | `/fv1`   | `false`        | `v1`              | `/fv1req`    | `/sfv1req`    |
+        | `/s`     | `/tv0`   | `true`         | `v0`              | `/tv0req`    | `/s/req`      |
+        | `/s`     | `/tv1`   | `true`         | `v1`              | `/tv1req`    | `/sreq`       |
+        | `/s`     | `/fv0/`  | `false`        | `v0`              | `/fv0/req`   | `/s/fv0/req`  |
+        | `/s`     | `/fv1/`  | `false`        | `v1`              | `/fv1/req`   | `/sfv1/req`   |
+        | `/s`     | `/tv0/`  | `true`         | `v0`              | `/tv0/req`   | `/s/req`      |
+        | `/s`     | `/tv1/`  | `true`         | `v1`              | `/tv1/req`   | `/sreq`       |
+
       ]],
       fields = {
         id = { skip = true },
@@ -611,6 +852,12 @@ return {
             strip the matching prefix from the upstream request URL.
           ]]
         },
+        path_handling = {
+          description = [[
+            Controls how the Service path, Route path and requested path are combined when sending a request to the
+            upstream. See above for a detailed description of each behavior.
+          ]]
+        },
         preserve_host = {
           description = [[
             When matching a Route via one of the `hosts` domain names,
@@ -636,7 +883,7 @@ return {
         },
         tags = {
           description = [[
-            An optional set of strings associated with the Route, for grouping and filtering.
+            An optional set of strings associated with the Route for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -660,7 +907,7 @@ return {
         username = {
           kind = "semi-optional",
           description = [[
-            The unique username of the consumer. You must send either
+            The unique username of the Consumer. You must send either
             this field or `custom_id` with the request.
           ]],
           example = "my-username",
@@ -668,7 +915,7 @@ return {
         custom_id = {
           kind = "semi-optional",
           description = [[
-            Field for storing an existing unique ID for the consumer -
+            Field for storing an existing unique ID for the Consumer -
             useful for mapping Kong with users in your existing database.
             You must send either this field or `username` with the request.
           ]],
@@ -676,7 +923,7 @@ return {
         },
         tags = {
           description = [[
-            An optional set of strings associated with the Consumer, for grouping and filtering.
+            An optional set of strings associated with the Consumer for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -744,37 +991,9 @@ return {
         would have otherwise matched config B.
       ]],
 
+      -- deprecated
       ["/plugins/schema/:name"] = {
-        GET = {
-          title = [[Retrieve Plugin Schema]],
-          endpoint = [[<div class="endpoint get">/plugins/schema/{plugin name}</div>]],
-          description = [[
-            Retrieve the schema of a plugin's configuration. This is useful to
-            understand what fields a plugin accepts, and can be used for building
-            third-party integrations to the Kong's plugin system.
-          ]],
-          response = [[
-            ```
-            HTTP 200 OK
-            ```
-
-            ```json
-            {
-                "fields": {
-                    "hide_credentials": {
-                        "default": false,
-                        "type": "boolean"
-                    },
-                    "key_names": {
-                        "default": "function",
-                        "required": true,
-                        "type": "array"
-                    }
-                }
-            }
-            ```
-          ]],
-        }
+        skip = true,
       },
 
       ["/plugins/enabled"] = {
@@ -858,7 +1077,7 @@ return {
         updated_at = { skip = true },
         name = {
           description = [[
-            The name of the Plugin that's going to be added. Currently the
+            The name of the Plugin that's going to be added. Currently, the
             Plugin must be installed in every Kong instance separately.
           ]],
           example = "rate-limiting",
@@ -884,31 +1103,15 @@ return {
         consumer = { description = [[
           If set, the plugin will activate only for requests where the specified has been authenticated.
           (Note that some plugins can not be restricted to consumers this way.). Leave unset for the plugin
-          to activate regardless of the authenticated consumer.
-        ]] },
-        run_on = { description = [[
-          Control on which Kong nodes this plugin will run, given a Service Mesh scenario.
-          Accepted values are:
-          * `first`, meaning "run on the first Kong node that is encountered by the request".
-            On an API Getaway scenario, this is the usual operation, since there is only
-            one Kong node in between source and destination. In a sidecar-to-sidecar Service
-            Mesh scenario, this means running the plugin only on the
-            Kong sidecar of the outbound connection.
-          * `second`, meaning "run on the second node that is encountered by the request".
-            This option is only relevant for sidecar-to-sidecar Service
-            Mesh scenarios: this means running the plugin only on the
-            Kong sidecar of the inbound connection.
-          * `all` means "run on all nodes", meaning both sidecars in a sidecar-to-sidecar
-            scenario. This is useful for tracing/logging plugins.
+          to activate regardless of the authenticated Consumer.
         ]] },
         protocols = {
           description = [[
-            A list of the request protocols that will trigger this plugin. Possible values are
-            `"http"`, `"https"`, `"tcp"`, and `"tls"`.
+            A list of the request protocols that will trigger this plugin.
 
             The default value, as well as the possible values allowed on this field, may change
             depending on the plugin type. For example, plugins that only work in stream mode will
-            may only support `"tcp"` and `"tls"`.
+            only support `"tcp"` and `"tls"`.
           ]],
           examples = {
             { "http", "https" },
@@ -917,7 +1120,7 @@ return {
         },
         tags = {
           description = [[
-            An optional set of strings associated with the Plugin, for grouping and filtering.
+            An optional set of strings associated with the Plugin for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -952,7 +1155,7 @@ return {
         },
         tags = {
           description = [[
-            An optional set of strings associated with the Certificate, for grouping and filtering.
+            An optional set of strings associated with the Certificate for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -989,9 +1192,13 @@ return {
           description = [[PEM-encoded public certificate of the CA.]],
           example = "-----BEGIN CERTIFICATE-----...",
         },
+        cert_digest = {
+          description = [[SHA256 hex digest of the public certificate.]],
+          example = "c641e28d77e93544f2fa87b2cf3f3d51...",
+        },
         tags = {
           description = [[
-            An optional set of strings associated with the Certificate, for grouping and filtering.
+            An optional set of strings associated with the Certificate for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -1026,7 +1233,7 @@ return {
         },
         tags = {
           description = [[
-            An optional set of strings associated with the SNIs, for grouping and filtering.
+            An optional set of strings associated with the SNIs for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -1052,15 +1259,15 @@ return {
         GET = {
           title = [[Show Upstream health for node]],
           description = [[
-            Displays the health status for all Targets of a given Upstream, according to
-            the perspective of a specific Kong node. Note that, being node-specific
-            information, making this same request to different nodes of the Kong cluster
-            may produce different results. For example, one specific node of the Kong
-            cluster may be experiencing network issues, causing it to fail to connect to
-            some Targets: these Targets will be marked as unhealthy by that node
-            (directing traffic from this node to other Targets that it can successfully
-            reach), but healthy to all others Kong nodes (which have no problems using that
-            Target).
+            Displays the health status for all Targets of a given Upstream, or for
+            the whole Upstream, according to the perspective of a specific Kong node.
+            Note that, being node-specific information, making this same request
+            to different nodes of the Kong cluster may produce different results.
+            For example, one specific node of the Kong cluster may be experiencing
+            network issues, causing it to fail to connect to some Targets: these
+            Targets will be marked as unhealthy by that node (directing traffic from
+            this node to other Targets that it can successfully reach), but healthy
+            to all others Kong nodes (which have no problems using that Target).
 
             The `data` field of the response contains an array of Target objects.
             The health for each Target is returned in its `health` field:
@@ -1078,13 +1285,24 @@ return {
               (circuit breakers) or [manually](#set-target-as-unhealthy),
               its status is displayed as `UNHEALTHY`. The load balancer is not directing
               any traffic to this Target via this Upstream.
+
+            When the request query parameter `balancer_health` is set to `1`, the
+            `data` field of the response refers to the Upstream itself, and its `health`
+            attribute is defined by the state of all of Upstream's Targets, according
+            to the field `healthchecks.threshold`.
           ]],
           endpoint = [[
-            <div class="endpoint get">/upstreams/{name or id}/health/</div>
+            <div class="endpoint get indent">/upstreams/{name or id}/health/</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `name or id`<br>**required** | The unique identifier **or** the name of the Upstream for which to display Target health.
+          ]],
+          request_query = [[
+            Attributes | Description
+            ---:| ---
+            `balancer_health`<br>*optional* | If set to 1, Kong will return the health status of the Upstream itself. See the `healthchecks.threshold` property.
           ]],
           response = [[
             ```
@@ -1115,6 +1333,22 @@ return {
                 ]
             }
             ```
+
+            If `balancer_health=1`:
+            ```
+            HTTP 200 OK
+            ```
+
+            ```json
+            {
+                "data": {
+                    "health": "HEALTHY",
+                    "id": "07131005-ba30-4204-a29f-0927d53257b4"
+                },
+                "next": null,
+                "node_id": "cbb297c0-14a9-46bc-ad91-1d0ef9b42df9"
+            }
+            ```
           ]],
         },
 
@@ -1124,17 +1358,18 @@ return {
         created_at = { skip = true },
         ["name"] = { description = [[This is a hostname, which must be equal to the `host` of a Service.]] },
         ["slots"] = { description = [[The number of slots in the loadbalancer algorithm (`10`-`65536`).]] },
-        ["algorithm"] = { description = [[Which load balancing algorithm to use. One of: `round-robin`, `consistent-hashing`, or `least-connections`.]] },
-        ["hash_on"] = { description = [[What to use as hashing input: `none` (resulting in a weighted-round-robin scheme with no hashing), `consumer`, `ip`, `header`, or `cookie`.]] },
-        ["hash_fallback"] = { description = [[What to use as hashing input if the primary `hash_on` does not return a hash (eg. header is missing, or no consumer identified). One of: `none`, `consumer`, `ip`, `header`, or `cookie`. Not available if `hash_on` is set to `cookie`.]] },
+        ["algorithm"] = { description = [[Which load balancing algorithm to use.]] },
+        ["hash_on"] = { description = [[What to use as hashing input. Using `none` results in a weighted-round-robin scheme with no hashing.]] },
+        ["hash_fallback"] = { description = [[What to use as hashing input if the primary `hash_on` does not return a hash (eg. header is missing, or no Consumer identified). Not available if `hash_on` is set to `cookie`.]] },
         ["hash_on_header"] = { kind = "semi-optional", skip_in_example = true, description = [[The header name to take the value from as hash input. Only required when `hash_on` is set to `header`.]] },
         ["hash_fallback_header"] = { kind = "semi-optional", skip_in_example = true, description = [[The header name to take the value from as hash input. Only required when `hash_fallback` is set to `header`.]] },
         ["hash_on_cookie"] = { kind = "semi-optional", skip_in_example = true, description = [[The cookie name to take the value from as hash input. Only required when `hash_on` or `hash_fallback` is set to `cookie`. If the specified cookie is not in the request, Kong will generate a value and set the cookie in the response.]] },
         ["hash_on_cookie_path"] = { kind = "semi-optional", skip_in_example = true, description = [[The cookie path to set in the response headers. Only required when `hash_on` or `hash_fallback` is set to `cookie`.]] },
         ["host_header"] = { description = [[The hostname to be used as `Host` header when proxying requests through Kong.]], example = "example.com", },
+        ["client_certificate"] = { description = [[If set, the certificate to be used as client certificate while TLS handshaking to the upstream server.]] },
         ["healthchecks.active.timeout"] = { description = [[Socket timeout for active health checks (in seconds).]] },
         ["healthchecks.active.concurrency"] = { description = [[Number of targets to check concurrently in active health checks.]] },
-        ["healthchecks.active.type"] = { description = [[Whether to perform active health checks using HTTP or HTTPS, or just attempt a TCP connection. Possible values are `tcp`, `http` or `https`.]] },
+        ["healthchecks.active.type"] = { description = [[Whether to perform active health checks using HTTP or HTTPS, or just attempt a TCP connection.]] },
         ["healthchecks.active.http_path"] = { description = [[Path to use in GET HTTP request to run as a probe on active health checks.]] },
         ["healthchecks.active.https_verify_certificate"] = { description = [[Whether to check the validity of the SSL certificate of the remote host when performing active health checks using HTTPS.]] },
         ["healthchecks.active.https_sni"] = { description = [[The hostname to use as an SNI (Server Name Identification) when performing active health checks using HTTPS. This is particularly useful when Targets are configured using IPs, so that the target host's certificate can be verified with the proper SNI.]], example = "example.com", },
@@ -1146,16 +1381,17 @@ return {
         ["healthchecks.active.unhealthy.tcp_failures"] = { description = [[Number of TCP failures in active probes to consider a target unhealthy.]] },
         ["healthchecks.active.unhealthy.timeouts"] = { description = [[Number of timeouts in active probes to consider a target unhealthy.]] },
         ["healthchecks.active.unhealthy.http_failures"] = { description = [[Number of HTTP failures in active probes (as defined by `healthchecks.active.unhealthy.http_statuses`) to consider a target unhealthy.]] },
-        ["healthchecks.passive.type"] = { description = [[Whether to perform passive health checks interpreting HTTP/HTTPS statuses, or just check for TCP connection success. Possible values are `tcp`, `http` or `https` (in passive checks, `http` and `https` options are equivalent.).]] },
+        ["healthchecks.passive.type"] = { description = [[Whether to perform passive health checks interpreting HTTP/HTTPS statuses, or just check for TCP connection success. In passive checks, `http` and `https` options are equivalent.]] },
         ["healthchecks.passive.healthy.http_statuses"] = { description = [[An array of HTTP statuses which represent healthiness when produced by proxied traffic, as observed by passive health checks.]] },
         ["healthchecks.passive.healthy.successes"] = { description = [[Number of successes in proxied traffic (as defined by `healthchecks.passive.healthy.http_statuses`) to consider a target healthy, as observed by passive health checks.]] },
         ["healthchecks.passive.unhealthy.http_statuses"] = { description = [[An array of HTTP statuses which represent unhealthiness when produced by proxied traffic, as observed by passive health checks.]] },
         ["healthchecks.passive.unhealthy.tcp_failures"] = { description = [[Number of TCP failures in proxied traffic to consider a target unhealthy, as observed by passive health checks.]] },
         ["healthchecks.passive.unhealthy.timeouts"] = { description = [[Number of timeouts in proxied traffic to consider a target unhealthy, as observed by passive health checks.]] },
         ["healthchecks.passive.unhealthy.http_failures"] = { description = [[Number of HTTP failures in proxied traffic (as defined by `healthchecks.passive.unhealthy.http_statuses`) to consider a target unhealthy, as observed by passive health checks.]] },
+        ["healthchecks.threshold"] = { description = [[The minimum percentage of the upstream's targets' weight that must be available for the whole upstream to be considered healthy.]] },
         tags = {
           description = [[
-            An optional set of strings associated with the Upstream, for grouping and filtering.
+            An optional set of strings associated with the Upstream for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -1201,8 +1437,9 @@ return {
             a new entry for the given target definition with a `weight` of 0.
           ]],
           endpoint = [[
-            <div class="endpoint delete">/upstreams/{upstream name or id}/targets/{host:port or id}</div>
+            <div class="endpoint delete indent">/upstreams/{upstream name or id}/targets/{host:port or id}</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `upstream name or id`<br>**required** | The unique identifier **or** the name of the upstream for which to delete the target.
@@ -1225,8 +1462,9 @@ return {
             The target object with the latest `created_at` is the current definition.
           ]],
           endpoint = [[
-            <div class="endpoint get">/upstreams/{name or id}/targets/all/</div>
+            <div class="endpoint get indent">/upstreams/{name or id}/targets/all/</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `name or id`<br>**required** | The unique identifier **or** the name of the upstream for which to list the targets.
@@ -1278,8 +1516,9 @@ return {
             status is propagated to the whole Kong cluster.
           ]],
           endpoint = [[
-            <div class="endpoint post">/upstreams/{upstream name or id}/targets/{target or id}/healthy</div>
+            <div class="endpoint post indent">/upstreams/{upstream name or id}/targets/{target or id}/healthy</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `upstream name or id`<br>**required** | The unique identifier **or** the name of the upstream.
@@ -1315,8 +1554,9 @@ return {
             target](#delete-target) instead.
           ]],
           endpoint = [[
-            <div class="endpoint post">/upstreams/{upstream name or id}/targets/{target or id}/unhealthy</div>
+            <div class="endpoint post indent">/upstreams/{upstream name or id}/targets/{target or id}/unhealthy</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `upstream name or id`<br>**required** | The unique identifier **or** the name of the upstream.
@@ -1346,8 +1586,9 @@ return {
             status is propagated to the whole Kong cluster.
           ]],
           endpoint = [[
-            <div class="endpoint post">/upstreams/{upstream name or id}/targets/{target or id}/{address}/healthy</div>
+            <div class="endpoint post indent">/upstreams/{upstream name or id}/targets/{target or id}/{address}/healthy</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `upstream name or id`<br>**required** | The unique identifier **or** the name of the upstream.
@@ -1383,8 +1624,9 @@ return {
             target](#delete-target) instead.
           ]],
           endpoint = [[
-            <div class="endpoint post">/upstreams/{upstream name or id}/targets/{target or id}/unhealthy</div>
+            <div class="endpoint post indent">/upstreams/{upstream name or id}/targets/{target or id}/unhealthy</div>
 
+            {:.indent}
             Attributes | Description
             ---:| ---
             `upstream name or id`<br>**required** | The unique identifier **or** the name of the upstream.
@@ -1411,14 +1653,14 @@ return {
         },
         weight = {
           description = [[
-            The weight this target gets within the upstream loadbalancer (`0`-`1000`).
+            The weight this target gets within the upstream loadbalancer (`0`-`65535`).
             If the hostname resolves to an SRV record, the `weight` value will be
             overridden by the value from the DNS record.
           ]]
         },
         tags = {
           description = [[
-            An optional set of strings associated with the Target, for grouping and filtering.
+            An optional set of strings associated with the Target for grouping and filtering.
           ]],
           examples = {
             { "user-level", "low-priority" },
@@ -1439,18 +1681,19 @@ return {
       endpoint_w_ek = [[
         ##### List All ${Entities}
 
-        <div class="endpoint ${method}">/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${entities_url}</div>
       ]],
       endpoint = [[
         ##### List All ${Entities}
 
-        <div class="endpoint ${method}">/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${entities_url}</div>
       ]],
       fk_endpoint = [[
         ##### List ${Entities} Associated to a Specific ${ForeignEntity}
 
-        <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}</div>
 
+        {:.indent}
         Attributes | Description
         ---:| ---
         `${foreign_entity} id`<br>**required** | The unique identifier of the ${ForeignEntity} whose ${Entities} are to be retrieved. When using this endpoint, only ${Entities} associated to the specified ${ForeignEntity} will be listed.
@@ -1458,8 +1701,19 @@ return {
       fk_endpoint_w_ek = [[
         ##### List ${Entities} Associated to a Specific ${ForeignEntity}
 
-        <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} ${endpoint_key} or id}/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} ${endpoint_key} or id}/${entities_url}</div>
 
+        {:.indent}
+        Attributes | Description
+        ---:| ---
+        `${foreign_entity} ${endpoint_key} or id`<br>**required** | The unique identifier or the `${endpoint_key}` attribute of the ${ForeignEntity} whose ${Entities} are to be retrieved. When using this endpoint, only ${Entities} associated to the specified ${ForeignEntity} will be listed.
+      ]],
+      fk_endpoint_w_fek = [[
+        ##### List ${Entities} Associated to a Specific ${ForeignEntity}
+
+        <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} ${endpoint_key} or id}/${entities_url}</div>
+
+        {:.indent}
         Attributes | Description
         ---:| ---
         `${foreign_entity} ${endpoint_key} or id`<br>**required** | The unique identifier or the `${endpoint_key}` attribute of the ${ForeignEntity} whose ${Entities} are to be retrieved. When using this endpoint, only ${Entities} associated to the specified ${ForeignEntity} will be listed.
@@ -1488,18 +1742,19 @@ return {
       endpoint_w_ek = [[
         ##### Create ${Entity}
 
-        <div class="endpoint ${method}">/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${entities_url}</div>
       ]],
       endpoint = [[
         ##### Create ${Entity}
 
-        <div class="endpoint ${method}">/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${entities_url}</div>
       ]],
       fk_endpoint = [[
         ##### Create ${Entity} Associated to a Specific ${ForeignEntity}
 
-        <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}</div>
 
+        {:.indent}
         Attributes | Description
         ---:| ---
         `${foreign_entity} id`<br>**required** | The unique identifier of the ${ForeignEntity} that should be associated to the newly-created ${Entity}.
@@ -1507,8 +1762,19 @@ return {
       fk_endpoint_w_ek = [[
         ##### Create ${Entity} Associated to a Specific ${ForeignEntity}
 
-        <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} ${endpoint_key} or id}/${entities_url}</div>
+        <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} ${endpoint_key} or id}/${entities_url}</div>
 
+        {:.indent}
+        Attributes | Description
+        ---:| ---
+        `${foreign_entity} ${endpoint_key} or id`<br>**required** | The unique identifier or the `${endpoint_key}` attribute of the ${ForeignEntity} that should be associated to the newly-created ${Entity}.
+      ]],
+      fk_endpoint_w_fek = [[
+        ##### Create ${Entity} Associated to a Specific ${ForeignEntity}
+
+        <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} ${endpoint_key} or id}/${entities_url}</div>
+
+        {:.indent}
         Attributes | Description
         ---:| ---
         `${foreign_entity} ${endpoint_key} or id`<br>**required** | The unique identifier or the `${endpoint_key}` attribute of the ${ForeignEntity} that should be associated to the newly-created ${Entity}.
@@ -1534,8 +1800,9 @@ return {
     endpoint_w_ek = [[
       ##### ${Active_verb} ${Entity}
 
-      <div class="endpoint ${method}">/${entities_url}/{${entity} ${endpoint_key} or id}</div>
+      <div class="endpoint ${method} indent">/${entities_url}/{${entity} ${endpoint_key} or id}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${entity} ${endpoint_key} or id`<br>**required** | The unique identifier **or** the ${endpoint_key} of the ${Entity} to ${active_verb}.
@@ -1543,17 +1810,29 @@ return {
     fk_endpoint_w_ek = [[
       ##### ${Active_verb} ${ForeignEntity} Associated to a Specific ${Entity}
 
-      <div class="endpoint ${method}">/${entities_url}/{${entity} ${endpoint_key} or id}/${foreign_entity_url}</div>
+      <div class="endpoint ${method} indent">/${entities_url}/{${entity} ${endpoint_key} or id}/${foreign_entity_url}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${entity} ${endpoint_key} or id`<br>**required** | The unique identifier **or** the ${endpoint_key} of the ${Entity} associated to the ${ForeignEntity} to be ${passive_verb}.
     ]],
+    fk_endpoint_w_fek = [[
+      ##### ${Active_verb} ${ForeignEntity} Associated to a Specific ${Entity}
+
+      <div class="endpoint ${method} indent">/${entities_url}/{${entity} id}/${foreign_entity_url}</div>
+
+      {:.indent}
+      Attributes | Description
+      ---:| ---
+      `${entity} id`<br>**required** | The unique identifier of the ${Entity} associated to the ${ForeignEntity} to be ${passive_verb}.
+    ]],
     endpoint = [[
       ##### ${Active_verb} ${Entity}
 
-      <div class="endpoint ${method}">/${entities_url}/{${entity} id}</div>
+      <div class="endpoint ${method} indent">/${entities_url}/{${entity} id}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${entity} id`<br>**required** | The unique identifier of the ${Entity} to ${active_verb}.
@@ -1561,8 +1840,9 @@ return {
     fk_endpoint = [[
       ##### ${Active_verb} ${ForeignEntity} Associated to a Specific ${Entity}
 
-      <div class="endpoint ${method}">/${entities_url}/{${entity} id}/${foreign_entity_url}</div>
+      <div class="endpoint ${method} indent">/${entities_url}/{${entity} id}/${foreign_entity_url}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${entity} id`<br>**required** | The unique identifier of the ${Entity} associated to the ${ForeignEntity} to be ${passive_verb}.
@@ -1570,8 +1850,9 @@ return {
     nested_endpoint_w_eks = [[
       ##### ${Active_verb} ${Entity} Associated to a Specific ${ForeignEntity}
 
-      <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} ${foreign_endpoint_key} or id}/${entities_url}/{${entity} ${endpoint_key} or id}</div>
+      <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} ${foreign_endpoint_key} or id}/${entities_url}/{${entity} ${endpoint_key} or id}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${foreign_entity} ${foreign_endpoint_key} or id`<br>**required** | The unique identifier **or** the ${foreign_endpoint_key} of the ${ForeignEntity} to ${active_verb}.
@@ -1580,8 +1861,9 @@ return {
     nested_endpoint_w_ek = [[
       ##### ${Active_verb} ${Entity} Associated to a Specific ${ForeignEntity}
 
-      <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}/{${entity} ${endpoint_key} or id}</div>
+      <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}/{${entity} ${endpoint_key} or id}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${foreign_entity} id`<br>**required** | The unique identifier of the ${ForeignEntity} to ${active_verb}.
@@ -1590,8 +1872,9 @@ return {
     nested_endpoint_w_fek = [[
       ##### ${Active_verb} ${Entity} Associated to a Specific ${ForeignEntity}
 
-      <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} ${foreign_endpoint_key} or id}/${entities_url}/{${entity} id}</div>
+      <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} ${foreign_endpoint_key} or id}/${entities_url}/{${entity} id}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${foreign_entity} ${foreign_endpoint_key} or id`<br>**required** | The unique identifier **or** the ${foreign_endpoint_key} of the ${ForeignEntity} to ${active_verb}.
@@ -1600,8 +1883,9 @@ return {
     nested_endpoint = [[
       ##### ${Active_verb} ${Entity} Associated to a Specific ${ForeignEntity}
 
-      <div class="endpoint ${method}">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}/{${entity} id}</div>
+      <div class="endpoint ${method} indent">/${foreign_entities_url}/{${foreign_entity} id}/${entities_url}/{${entity} id}</div>
 
+      {:.indent}
       Attributes | Description
       ---:| ---
       `${foreign_entity} id`<br>**required** | The unique identifier of the ${ForeignEntity} to ${active_verb}.
@@ -1707,10 +1991,44 @@ return {
       {
         title = [[Supported Content Types]],
         text = [[
-          The Admin API accepts 2 content types on every endpoint:
+          The Admin API accepts 3 content types on every endpoint:
+
+          - **application/json**
+
+          Handy for complex bodies (ex: complex plugin configuration), in that case simply send
+          a JSON representation of the data you want to send. Example:
+
+          ```json
+          {
+              "config": {
+                  "limit": 10,
+                  "period": "seconds"
+              }
+          }
+          ```
+
 
           - **application/x-www-form-urlencoded**
-          - **application/json**
+
+          Simple enough for basic request bodies, you will probably use it most of the time.
+          Note that when sending nested values, Kong expects nested objects to be referenced
+          with dotted keys. Example:
+
+          ```
+          config.limit=10&config.period=seconds
+          ```
+
+
+          - **multipart/form-data**
+
+          Similar to URL-encoded, this content type uses dotted keys to reference nested objects.
+          Here is an example of sending a Lua file to the pre-function Kong plugin:
+
+          ```
+          curl -i -X POST http://localhost:8001/services/plugin-testing/plugins \
+               -F "name=pre-function" \
+               -F "config.functions=@custom-auth.lua"
+          ```
         ]],
       },
     },
@@ -1751,8 +2069,9 @@ return {
           POST = {
             title = [[Reload declarative configuration]],
             endpoint = [[
-              <div class="endpoint post">/config</div>
+              <div class="endpoint post indent">/config</div>
 
+              {:.indent}
               Attributes | Description
               ---:| ---
               `config`<br>**required** | The config data (in YAML or JSON format) to be loaded.

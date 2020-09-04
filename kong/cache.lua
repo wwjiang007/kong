@@ -4,7 +4,6 @@ local resty_mlcache = require "resty.mlcache"
 local type    = type
 local max     = math.max
 local ngx_log = ngx.log
-local ngx_now = ngx.now
 local ERR     = ngx.ERR
 local NOTICE  = ngx.NOTICE
 local DEBUG   = ngx.DEBUG
@@ -99,7 +98,7 @@ end
 ------------------------------------------------------------------------ end --
 
 
-local _init
+local _init = {}
 
 
 local function log(lvl, ...)
@@ -112,8 +111,12 @@ local mt = { __index = _M }
 
 
 function _M.new(opts)
-  if _init then
-    error("kong.cache was already created", 2)
+  if type(opts.shm_name) ~= "string" then
+    error("opts.shm_name must be a string", 2)
+  end
+
+  if _init[opts.shm_name] then
+    error("kong.cache (" .. opts.shm_name .. ") was already created", 2)
   end
 
   -- opts validation
@@ -126,10 +129,6 @@ function _M.new(opts)
 
   if not opts.worker_events then
     error("opts.worker_events is required", 2)
-  end
-
-  if opts.propagation_delay and type(opts.propagation_delay) ~= "number" then
-    error("opts.propagation_delay must be a number", 2)
   end
 
   if opts.ttl and type(opts.ttl) ~= "number" then
@@ -152,9 +151,17 @@ function _M.new(opts)
   local shm_names = {}
 
   for i = 1, opts.cache_pages or 1 do
-    local channel_name  = (i == 1) and "mlcache"            or "mlcache_2"
-    local shm_name      = (i == 1) and "kong_db_cache"      or "kong_db_cache_2"
-    local shm_miss_name = (i == 1) and "kong_db_cache_miss" or "kong_db_cache_miss_2"
+    local channel_name  = (i == 1) and "mlcache"                 or "mlcache_2"
+    local shm_name      = (i == 1) and opts.shm_name             or opts.shm_name .. "_2"
+    local shm_miss_name = (i == 1) and opts.shm_name .. "_miss"  or opts.shm_name .. "_miss_2"
+
+    if not ngx.shared[shm_name] then
+      log(ERR, "shared dictionary ", shm_name, " not found")
+    end
+
+    if not ngx.shared[shm_miss_name] then
+      log(ERR, "shared dictionary ", shm_miss_name, " not found")
+    end
 
     if ngx.shared[shm_name] then
       local mlcache, err = resty_mlcache.new(shm_name, shm_name, {
@@ -191,13 +198,18 @@ function _M.new(opts)
     end
   end
 
+  local curr_mlcache = 1
+
+  if opts.cache_pages == 2 then
+    curr_mlcache = ngx.shared.kong:get("kong:cache:" .. opts.shm_name .. ":curr_mlcache") or 1
+  end
+
   local self          = {
-    propagation_delay = max(opts.propagation_delay or 0, 0),
     cluster_events    = opts.cluster_events,
-    mlcache           = mlcaches[1],
+    mlcache           = mlcaches[curr_mlcache],
     mlcaches          = mlcaches,
     shm_names         = shm_names,
-    curr_mlcache      = 1,
+    curr_mlcache      = curr_mlcache,
   }
 
   local ok, err = self.cluster_events:subscribe("invalidations", function(key)
@@ -209,9 +221,15 @@ function _M.new(opts)
                 "channel: " .. err
   end
 
-  _init = true
+  _init[opts.shm_name] = true
 
   return setmetatable(self, mt)
+end
+
+
+function _M:save_curr_page()
+  return ngx.shared.kong:set(
+    "kong:cache:" .. self.shm_names[1] .. ":curr_mlcache", self.curr_mlcache)
 end
 
 
@@ -220,9 +238,17 @@ function _M:get(key, opts, cb, ...)
     error("key must be a string", 2)
   end
 
-  --log(DEBUG, "get from key: ", key)
+  local shadow = (opts or {}).shadow
 
-  local v, err = self.mlcache:get(key, opts, cb, ...)
+  local current_page = self.curr_mlcache or 1
+  local get_page
+  if shadow and #self.mlcaches == 2 then
+    get_page = current_page == 1 and 2 or 1
+  else
+    get_page = current_page
+  end
+
+  local v, err = self.mlcaches[get_page]:get(key, opts, cb, ...)
   if err then
     return nil, "failed to get from node cache: " .. err
   end
@@ -240,7 +266,17 @@ function _M:get_bulk(bulk, opts)
     error("opts must be a table", 2)
   end
 
-  local res, err = self.mlcache:get_bulk(bulk, opts)
+  local shadow = (opts or {}).shadow
+
+  local current_page = self.curr_mlcache or 1
+  local get_bulk_page
+  if shadow and #self.mlcaches == 2 then
+    get_bulk_page = current_page == 1 and 2 or 1
+  else
+    get_bulk_page = current_page
+  end
+
+  local res, err = self.mlcaches[get_bulk_page]:get_bulk(bulk, opts)
   if err then
     return nil, "failed to get_bulk from node cache: " .. err
   end
@@ -249,30 +285,41 @@ function _M:get_bulk(bulk, opts)
 end
 
 
-function _M:safe_set(key, value, shadow_page)
+function _M:safe_set(key, value, shadow)
   local str_marshalled, err = marshall_for_shm(value, self.mlcache.ttl,
                                                       self.mlcache.neg_ttl)
   if err then
     return nil, err
   end
 
-  local page = 1
-  if shadow_page and #self.mlcaches == 2 then
-    page = (self.curr_mlcache == 1) and 2 or 1
+  local current_page = self.curr_mlcache or 1
+
+  local set_page
+  if shadow and #self.mlcaches == 2 then
+    set_page = current_page == 1 and 2 or 1
+  else
+    set_page = current_page
   end
 
-  local shm_name = self.shm_names[page]
-
+  local shm_name = self.shm_names[set_page]
   return ngx.shared[shm_name]:safe_set(shm_name .. key, str_marshalled)
 end
 
 
-function _M:probe(key)
+function _M:probe(key, shadow)
   if type(key) ~= "string" then
     error("key must be a string", 2)
   end
 
-  local ttl, err, v = self.mlcache:peek(key)
+  local current_page = self.curr_mlcache or 1
+  local probe_page
+  if shadow and #self.mlcaches == 2 then
+    probe_page = current_page == 1 and 2 or 1
+  else
+    probe_page = current_page
+  end
+
+  local ttl, err, v = self.mlcaches[probe_page]:peek(key)
   if err then
     return nil, "failed to probe from node cache: " .. err
   end
@@ -281,51 +328,60 @@ function _M:probe(key)
 end
 
 
-function _M:invalidate_local(key)
+function _M:invalidate_local(key, shadow)
   if type(key) ~= "string" then
     error("key must be a string", 2)
   end
 
   log(DEBUG, "invalidating (local): '", key, "'")
 
-  local ok, err = self.mlcache:delete(key)
+  local current_page = self.curr_mlcache or 1
+  local delete_page
+  if shadow and #self.mlcaches == 2 then
+    delete_page = current_page == 1 and 2 or 1
+  else
+    delete_page = current_page
+  end
+
+  local ok, err = self.mlcaches[delete_page]:delete(key)
   if not ok then
     log(ERR, "failed to delete entity from node cache: ", err)
   end
 end
 
 
-function _M:invalidate(key)
+function _M:invalidate(key, shadow)
   if type(key) ~= "string" then
     error("key must be a string", 2)
   end
 
-  self:invalidate_local(key)
+  self:invalidate_local(key, shadow)
 
-  local nbf
-  if self.propagation_delay > 0 then
-    nbf = ngx_now() + self.propagation_delay
+  if shadow then
+    return
   end
 
-  log(DEBUG, "broadcasting (cluster) invalidation for key: '", key, "' ",
-             "with nbf: '", nbf or "none", "'")
+  log(DEBUG, "broadcasting (cluster) invalidation for key: '", key, "'")
 
-  local ok, err = self.cluster_events:broadcast("invalidations", key, nbf)
+  local ok, err = self.cluster_events:broadcast("invalidations", key)
   if not ok then
     log(ERR, "failed to broadcast cached entity invalidation: ", err)
   end
 end
 
 
-function _M:purge(shadow_page)
+function _M:purge(shadow)
   log(NOTICE, "purging (local) cache")
 
-  local page = 1
-  if shadow_page and #self.mlcaches == 2 then
-    page = (self.curr_mlcache == 1) and 2 or 1
+  local current_page = self.curr_mlcache or 1
+  local purge_page
+  if shadow and #self.mlcaches == 2 then
+    purge_page = current_page == 1 and 2 or 1
+  else
+    purge_page = current_page
   end
 
-  local ok, err = self.mlcaches[page]:purge()
+  local ok, err = self.mlcaches[purge_page]:purge(true)
   if not ok then
     log(ERR, "failed to purge cache: ", err)
   end
@@ -339,8 +395,11 @@ function _M:flip()
 
   log(DEBUG, "flipping current cache")
 
-  self.curr_mlcache = (self.curr_mlcache == 1) and 2 or 1
-  self.mlcache = self.mlcaches[self.curr_mlcache]
+  local current_page = self.curr_mlcache or 1
+  local next_page = current_page == 1 and 2 or 1
+
+  self.curr_mlcache = next_page
+  self.mlcache = self.mlcaches[next_page]
 end
 
 

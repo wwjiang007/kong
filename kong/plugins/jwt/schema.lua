@@ -4,7 +4,6 @@ local typedefs = require "kong.db.schema.typedefs"
 return {
   name = "jwt",
   fields = {
-    { run_on = typedefs.run_on_first },
     { protocols = typedefs.protocols_http },
     { config = {
         type = "record",
@@ -27,7 +26,7 @@ return {
                 type = "string",
                 one_of = { "exp", "nbf" },
           }, }, },
-          { anonymous = { type = "string", uuid = true, legacy = true }, },
+          { anonymous = { type = "string" }, },
           { run_on_preflight = { type = "boolean", default = true }, },
           { maximum_expiration = {
             type = "number",

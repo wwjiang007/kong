@@ -1,6 +1,7 @@
 use strict;
 use warnings FATAL => 'all';
 use Test::Nginx::Socket::Lua;
+use Test::Nginx::Socket::Lua::Stream;
 use t::Util;
 
 plan tests => repeat_each() * (blocks() * 4) + 9;
@@ -278,7 +279,7 @@ GET /t
 GET /t
 --- error_code: 204
 --- response_headers_like
-Server: kong/\d+\.\d+\.\d+(rc\d?)?
+Server: kong/\d+\.\d+\.\d+(rc.\d|alpha\.\d|beta\.\d)?
 --- response_body chop
 
 --- no_error_log
@@ -471,7 +472,7 @@ Content-Type: application/json; charset=utf-8
 
 
 
-=== TEST 18: response.exit() sends json response when body is table overrides content-type
+=== TEST 18: response.exit() sends json response when body is table, but does not override content-type
 --- http_config eval: $t::Util::HttpConfig
 --- config
     location = /t {
@@ -481,15 +482,15 @@ Content-Type: application/json; charset=utf-8
             local pdk = PDK.new()
 
             pdk.response.exit(200, { message = "hello" }, {
-                ["Content-Type"] = "text/plain"
+                ["Content-Type"] = "application/jwk+json; charset=utf-8"
             })
         }
     }
 --- request
 GET /t
 --- error_code: 200
---- response_headers_like
-Content-Type: application/json; charset=utf-8
+--- response_headers
+Content-Type: application/jwk+json; charset=utf-8
 --- response_body chop
 {"message":"hello"}
 --- no_error_log
@@ -590,7 +591,7 @@ a
             local pdk = PDK.new()
 
             pdk.response.exit(200, { message = "hello" }, {
-                ["Content-Type"] = "text/plain",
+                ["Content-Type"] = "application/jwk+json; charset=utf-8",
                 ["Content-Length"] = "100"
             })
         }
@@ -598,8 +599,8 @@ a
 --- request
 GET /t
 --- error_code: 200
---- response_headers_like
-Content-Type: application/json; charset=utf-8
+--- response_headers
+Content-Type: application/jwk+json; charset=utf-8
 Content-Length: 19
 --- response_body chop
 {"message":"hello"}
@@ -614,7 +615,7 @@ Content-Length: 19
     location = /t {
         default_type 'text/test';
         access_by_lua_block {
-            ngx.req.http_version = function() return "2" end
+            ngx.req.http_version = function() return 2 end
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
 
@@ -696,7 +697,7 @@ hello
     location = /t {
         default_type 'text/test';
         access_by_lua_block {
-            ngx.req.http_version = function() return "2" end
+            ngx.req.http_version = function() return 2 end
 
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
@@ -813,7 +814,7 @@ grpc-message: SHOW ME
     location = /t {
         default_type 'text/test';
         access_by_lua_block {
-            ngx.req.http_version = function() return "2" end
+            ngx.req.http_version = function() return 2 end
 
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
@@ -842,7 +843,7 @@ grpc-message: OK
     location = /t {
         default_type 'text/test';
         access_by_lua_block {
-            ngx.req.http_version = function() return "2" end
+            ngx.req.http_version = function() return 2 end
 
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
@@ -1006,7 +1007,7 @@ GET /t
     location = /t {
         default_type 'text/test';
         access_by_lua_block {
-            ngx.req.http_version = function() return "2" end
+            ngx.req.http_version = function() return 2 end
 
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
@@ -1034,7 +1035,7 @@ grpc-message: Unauthenticated
     location = /t {
         default_type 'text/test';
         access_by_lua_block {
-            ngx.req.http_version = function() return "2" end
+            ngx.req.http_version = function() return 2 end
 
             local PDK = require "kong.pdk"
             local pdk = PDK.new()
@@ -1054,3 +1055,74 @@ grpc-message: Hello
 --- error_code: 401
 --- no_error_log
 [error]
+
+
+
+=== TEST 40: response.exit() works under stream subsystem in preread
+--- stream_server_config
+    preread_by_lua_block {
+        local PDK = require "kong.pdk"
+        local pdk = PDK.new()
+
+        pdk.response.exit(200, "ok")
+    }
+
+    return "nope";
+--- stream_response chop
+ok
+--- no_error_log
+[error]
+--- error_log
+finalize stream session: 200
+
+
+
+=== TEST 41: response.exit() rejects invalid status code
+--- stream_server_config
+    preread_by_lua_block {
+        local PDK = require "kong.pdk"
+        local pdk = PDK.new()
+
+        pdk.response.exit(100, "continue")
+    }
+
+    return "nope";
+--- stream_response
+--- no_error_log
+finalize stream session: 100
+--- error_log
+unacceptable code, only 200, 400, 403, 500, 502 and 503 are accepted
+
+
+
+=== TEST 42: response.exit() logs 5xx error instead of returning it to the client
+--- stream_server_config
+    preread_by_lua_block {
+        local PDK = require "kong.pdk"
+        local pdk = PDK.new()
+
+        pdk.response.exit(500, "error message")
+    }
+
+    return "nope";
+--- stream_response
+--- error_log
+finalize stream session: 500
+unable to proxy stream connection, status: 500, err: error message
+
+
+
+=== TEST 43: response.exit() logs 4xx error instead of returning it to the client
+--- stream_server_config
+    preread_by_lua_block {
+        local PDK = require "kong.pdk"
+        local pdk = PDK.new()
+
+        pdk.response.exit(400, "error message")
+    }
+
+    return "nope";
+--- stream_response
+--- error_log
+finalize stream session: 400
+unable to proxy stream connection, status: 400, err: error message

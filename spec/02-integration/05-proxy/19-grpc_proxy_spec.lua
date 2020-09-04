@@ -57,7 +57,7 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     it("proxies grpc", function()
-      local ok, resp = proxy_client_grpc({
+      local ok, resp = assert(proxy_client_grpc({
         service = "hello.HelloService.SayHello",
         body = {
           greeting = "world!"
@@ -65,13 +65,59 @@ for _, strategy in helpers.each_strategy() do
         opts = {
           ["-authority"] = "grpc",
         }
-      })
+      }))
+      assert.truthy(ok)
+      assert.truthy(resp)
+    end)
+
+    it("proxies grpc, streaming response", function()
+      local ok, resp = assert(proxy_client_grpc({
+        service = "hello.HelloService.LotsOfReplies",
+        body = {
+          greeting = "world!"
+        },
+        opts = {
+          ["-authority"] = "grpc",
+        }
+      }))
+      assert.truthy(ok)
+      assert.truthy(resp)
+    end)
+
+    it("proxies grpc, streaming request", function()
+      local ok, resp = assert(proxy_client_grpc({
+        service = "hello.HelloService.LotsOfGreetings",
+        body = [[
+            { "greeting": "world!" }
+            { "greeting": "people!" }
+            { "greeting": "y`all!" }
+        ]],
+        opts = {
+          ["-authority"] = "grpc",
+        }
+      }))
+      assert.truthy(ok)
+      assert.truthy(resp)
+    end)
+
+    it("proxies grpc, streaming request/response", function()
+      local ok, resp = assert(proxy_client_grpc({
+        service = "hello.HelloService.BidiHello",
+        body = [[
+            { "greeting": "world!" }
+            { "greeting": "people!" }
+            { "greeting": "y`all!" }
+        ]],
+        opts = {
+          ["-authority"] = "grpc",
+        }
+      }))
       assert.truthy(ok)
       assert.truthy(resp)
     end)
 
     it("proxies grpcs", function()
-      local ok, resp = proxy_client_grpcs({
+      local ok, resp = assert(proxy_client_grpcs({
         service = "hello.HelloService.SayHello",
         body = {
           greeting = "world!"
@@ -79,7 +125,7 @@ for _, strategy in helpers.each_strategy() do
         opts = {
           ["-authority"] = "grpcs",
         }
-      })
+      }))
       assert.truthy(ok)
       assert.truthy(resp)
     end)

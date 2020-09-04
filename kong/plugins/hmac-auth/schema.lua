@@ -13,14 +13,13 @@ return {
   name = "hmac-auth",
   fields = {
     { consumer = typedefs.no_consumer },
-    { run_on = typedefs.run_on_first },
     { protocols = typedefs.protocols_http },
     { config = {
         type = "record",
         fields = {
           { hide_credentials = { type = "boolean", default = false }, },
           { clock_skew = { type = "number", default = 300, gt = 0 }, },
-          { anonymous = { type = "string", uuid = true, legacy = true }, },
+          { anonymous = { type = "string" }, },
           { validate_request_body = { type = "boolean", default = false }, },
           { enforce_headers = {
               type = "array",

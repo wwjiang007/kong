@@ -1,11 +1,12 @@
 local typedefs = require "kong.db.schema.typedefs"
-local openssl_pkey = require "openssl.pkey"
-local openssl_x509 = require "openssl.x509"
+local openssl_pkey = require "resty.openssl.pkey"
+local openssl_x509 = require "resty.openssl.x509"
 
 return {
   name        = "certificates",
   primary_key = { "id" },
   dao         = "kong.db.dao.certificates",
+  workspaceable = true,
 
   fields = {
     { id = typedefs.uuid, },
@@ -22,7 +23,7 @@ return {
         local cert = openssl_x509.new(entity.cert)
         local key = openssl_pkey.new(entity.key)
 
-        if cert:getPublicKey():toPEM() ~= key:toPEM("public") then
+        if cert:get_pubkey():to_PEM() ~= key:to_PEM("public") then
           return nil, "certificate does not match key"
         end
 

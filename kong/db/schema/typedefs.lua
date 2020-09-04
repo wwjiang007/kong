@@ -1,8 +1,8 @@
 --- A library of ready-to-use type synonyms to use in schema definitions.
 -- @module kong.db.schema.typedefs
 local utils = require "kong.tools.utils"
-local openssl_pkey = require "openssl.pkey"
-local openssl_x509 = require "openssl.x509"
+local openssl_pkey = require "resty.openssl.pkey"
+local openssl_x509 = require "resty.openssl.x509"
 local iputils = require "resty.iputils"
 local Schema = require("kong.db.schema")
 local socket_url = require("socket.url")
@@ -29,6 +29,12 @@ local function validate_host(host)
   end
 
   return true
+end
+
+
+local function validate_host_with_optional_port(host)
+  local res, err_or_port = utils.normalize_ip(host)
+  return (res and true or nil), err_or_port
 end
 
 
@@ -70,7 +76,10 @@ end
 
 
 local function validate_path(path)
-  if not match(path, "^/[%w%.%-%_~%/%%]*$") then
+  if not match(path, "^/[%w%.%-%_%~%/%%%:%@" ..
+                     "%!%$%&%'%(%)%*%+%,%;%=" .. -- RFC 3986 "sub-delims"
+                     "]*$")
+  then
     return nil,
            "invalid path: '" .. path ..
            "' (characters outside of the reserved list of RFC 3986 found)",
@@ -83,7 +92,7 @@ local function validate_path(path)
 
     if raw:find("%", nil, true) then
       local err = raw:sub(raw:find("%%.?.?"))
-      return nil, "invalid url-encoded value: '" .. err .. "'"
+      return nil, "invalid url-encoded value: '" .. err .. "'", "percent"
     end
   end
 
@@ -173,10 +182,9 @@ end
 
 
 local function validate_certificate(cert)
-  local ok
-  ok, cert = pcall(openssl_x509.new, cert)
-  if not ok then
-    return nil, "invalid certificate: " .. cert
+  local _, err = openssl_x509.new(cert)
+  if err then
+    return nil, "invalid certificate: " .. err
   end
 
   return true
@@ -184,10 +192,9 @@ end
 
 
 local function validate_key(key)
-  local ok
-  ok, key = pcall(openssl_pkey.new, key)
-  if not ok then
-    return nil, "invalid key: " .. key
+  local _, err =  openssl_pkey.new(key)
+  if err then
+    return nil, "invalid key: " .. err
   end
 
   return true
@@ -212,6 +219,12 @@ typedefs.protocol = Schema.define {
 typedefs.host = Schema.define {
   type = "string",
   custom_validator = validate_host,
+}
+
+
+typedefs.host_with_optional_port = Schema.define {
+  type = "string",
+  custom_validator = validate_host_with_optional_port,
 }
 
 
@@ -294,13 +307,6 @@ typedefs.auto_timestamp_ms = Schema.define {
 }
 
 
-typedefs.no_api = Schema.define {
-  type = "foreign",
-  reference = "apis",
-  eq = null,
-}
-
-
 typedefs.no_route = Schema.define {
   type = "foreign",
   reference = "routes",
@@ -347,20 +353,6 @@ typedefs.key = Schema.define {
 }
 
 
-typedefs.run_on = Schema.define {
-  type = "string",
-  required = true,
-  default = "first",
-  one_of = { "first", "second", "all" },
-}
-
-typedefs.run_on_first = Schema.define {
-  type = "string",
-  required = true,
-  default = "first",
-  one_of = { "first" },
-}
-
 typedefs.tag = Schema.define {
   type = "string",
   required = true,
@@ -400,19 +392,26 @@ typedefs.protocols_http = Schema.define {
 
 local function validate_host_with_wildcards(host)
   local no_wildcards = string.gsub(host, "%*", "abc")
-  return typedefs.host.custom_validator(no_wildcards)
+  return typedefs.host_with_optional_port.custom_validator(no_wildcards)
 end
 
 local function validate_path_with_regexes(path)
 
-
   local ok, err, err_code = typedefs.path.custom_validator(path)
 
-  if ok or err_code ~= "rfc3986" then
+  if err_code == "percent" then
     return ok, err, err_code
   end
 
-  -- URI contains characters outside of the reserved list of RFC 3986:
+  -- We can't take an ok from validate_path as a success just yet,
+  -- because the router is currently more strict than RFC 3986 for
+  -- non-regex paths:
+  if ngx.re.find(path, [[^[a-zA-Z0-9\.\-_~/%]*$]]) then
+    return true
+  end
+
+  -- URI contains characters outside of the list recognized by the
+  -- router as valid non-regex paths.
   -- the value will be interpreted as a regex by the router; but is it a
   -- valid one? Let's dry-run it with the same options as our router.
   local _, _, err = ngx.re.find("", path, "aj")

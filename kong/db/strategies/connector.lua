@@ -1,7 +1,15 @@
+local type = type
 local fmt = string.format
 
 
-local Connector = {}
+local Connector = {
+  defaults = {
+    pagination = {
+      page_size     = 1000,
+      max_page_size = 50000,
+    },
+  },
+}
 
 
 function Connector:init()
@@ -16,18 +24,27 @@ function Connector:init_worker()
 end
 
 
+function Connector:get_page_size(options)
+  if type(options) == "table" and type(options.pagination) == "table" then
+    return options.pagination.page_size
+  end
+
+  return self.defaults.pagination.page_size
+end
+
+
 do
   local past_init
   local ngx = ngx
 
 
-  function Connector:store_connection(conn)
+  function Connector:store_connection(conn, operation)
     if not past_init and ngx and ngx.get_phase() ~= "init" then
       past_init = true
     end
 
     if ngx and past_init then
-      ngx.ctx.connection = conn
+      ngx.ctx["connection_" .. (operation or "write")] = conn
 
     else
       self.connection = conn
@@ -35,13 +52,13 @@ do
   end
 
 
-  function Connector:get_stored_connection()
+  function Connector:get_stored_connection(operation)
     if not past_init and ngx and ngx.get_phase() ~= "init" then
       past_init = true
     end
 
     if ngx and past_init then
-      return ngx.ctx.connection
+      return ngx.ctx["connection_" .. (operation or "write")]
     end
 
     return self.connection
@@ -142,22 +159,6 @@ end
 function Connector:record_migration()
   error(fmt("record_migration() not implemented for '%s' strategy",
             self.database))
-end
-
-
-function Connector:is_014()
-  -- Implemented pre 1.0 release with Postgres/Cassandra connectors.
-  -- All future connectors (if any) won't have to provide a mean to
-  -- migrate from 0.14, hence do not have to implement this function.
-  return {}
-end
-
-
-function Connector:are_014_apis_present()
-  -- Implemented pre 1.0 release with Postgres/Cassandra connectors.
-  -- All future connectors (if any) won't have to provide a mean to
-  -- migrate from 0.14, hence do not have to implement this function.
-  return false
 end
 
 

@@ -42,6 +42,9 @@ local ERRORS              = {
   FOREIGN_KEYS_UNRESOLVED = 13, -- foreign key(s) could not be resolved
   DECLARATIVE_CONFIG      = 14, -- error parsing declarative configuration
   TRANSFORMATION_ERROR    = 15, -- error with dao transformations
+  INVALID_FOREIGN_KEY     = 16, -- foreign key is valid for matching a row
+  INVALID_WORKSPACE       = 17, -- strategy reports a workspace error
+  INVALID_UNIQUE_GLOBAL   = 18, -- unique field value is invalid for global query
 }
 
 
@@ -64,6 +67,9 @@ local ERRORS_NAMES                 = {
   [ERRORS.FOREIGN_KEYS_UNRESOLVED] = "foreign keys unresolved",
   [ERRORS.DECLARATIVE_CONFIG]      = "invalid declarative configuration",
   [ERRORS.TRANSFORMATION_ERROR]    = "transformation error",
+  [ERRORS.INVALID_FOREIGN_KEY]     = "invalid foreign key",
+  [ERRORS.INVALID_WORKSPACE]       = "invalid workspace",
+  [ERRORS.INVALID_UNIQUE_GLOBAL]   = "invalid global query",
 }
 
 
@@ -184,6 +190,17 @@ function _M:invalid_primary_key(primary_key)
   local message = fmt("invalid primary key: '%s'", pl_pretty(primary_key, ""))
 
   return new_err_t(self, ERRORS.INVALID_PRIMARY_KEY, message, primary_key)
+end
+
+
+function _M:invalid_foreign_key(foreign_key)
+  if type(foreign_key) ~= "table" then
+    error("foreign_key must be a table", 2)
+  end
+
+  local message = fmt("invalid foreign key: '%s'", pl_pretty(foreign_key, ""))
+
+  return new_err_t(self, ERRORS.INVALID_FOREIGN_KEY, message, foreign_key)
 end
 
 
@@ -394,6 +411,7 @@ function _M:transformation_error(err)
   return new_err_t(self, ERRORS.TRANSFORMATION_ERROR, err)
 end
 
+
 function _M:invalid_size(err)
   if type(err) ~= "string" then
     error("err must be a string", 2)
@@ -468,6 +486,27 @@ function _M:declarative_config(err_t)
                       pl_pretty(err_t, ""))
 
   return new_err_t(self, ERRORS.DECLARATIVE_CONFIG, message, err_t)
+end
+
+
+function _M:invalid_workspace(ws_id)
+  if type(ws_id) ~= "string" then
+    error("ws_id must be a string", 2)
+  end
+
+  local message = fmt("invalid workspace '%s'", ws_id)
+
+  return new_err_t(self, ERRORS.INVALID_WORKSPACE, message)
+end
+
+
+function _M:invalid_unique_global(name)
+  if type(name) ~= "string" then
+    error("name must be a string", 2)
+  end
+
+  return new_err_t(self, ERRORS.INVALID_UNIQUE_GLOBAL,
+                   fmt("unique key %s is invalid for global query", name))
 end
 
 

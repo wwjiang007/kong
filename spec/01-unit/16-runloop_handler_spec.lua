@@ -36,12 +36,12 @@ local function setup_it_block()
       },
       configuration = {
         database = "dummy",
-        router_consistency = "strict",
+        worker_consistency = "strict",
       },
       db = {
         strategy = "dummy",
       },
-      cache = {
+      core_cache = {
         _cache = my_cache,
         get = function(_, k)
           return my_cache[k] or "1"
@@ -163,10 +163,10 @@ describe("runloop handler", function()
       assert.equal(1, semaphores[1].value)
     end)
 
-    it("does not call update_router if router_consistency is eventual", function()
+    it("does not call update_router if worker_consistency is eventual", function()
       setup_it_block()
 
-      kong.configuration.router_consistency = "eventual"
+      kong.configuration.worker_consistency = "eventual"
 
       local handler = require "kong.runloop.handler"
 
@@ -182,17 +182,17 @@ describe("runloop handler", function()
       assert.equal(mock_router, handler._get_updated_router())
     end)
 
-    it("calls build_router if router version changes and router_consistency is strict", function()
+    it("calls build_router if router version changes and worker_consistency is strict", function()
       setup_it_block()
 
-      kong.configuration.router_consistency = "strict"
+      kong.configuration.worker_consistency = "strict"
 
       local handler = require "kong.runloop.handler"
 
       local latest_router
 
       local build_router_spy = spy.new(function()
-        handler._set_router_version(kong.cache:get("router:version"))
+        handler._set_router_version(kong.core_cache:get("router:version"))
         latest_router = {
           exec = function()
             return nil
@@ -211,7 +211,7 @@ describe("runloop handler", function()
 
       local saved_router = latest_router
 
-      kong.cache._cache["router:version"] = "new_version"
+      kong.core_cache._cache["router:version"] = "new_version"
 
       handler.access.before({})
 
@@ -220,17 +220,17 @@ describe("runloop handler", function()
       assert.not_equal(saved_router, latest_router)
     end)
 
-    it("does not call build_router if router version does not change and router_consistency is strict", function()
+    it("does not call build_router if router version does not change and worker_consistency is strict", function()
       setup_it_block()
 
-      kong.configuration.router_consistency = "strict"
+      kong.configuration.worker_consistency = "strict"
 
       local handler = require "kong.runloop.handler"
 
       local latest_router
 
       local build_router_spy = spy.new(function()
-        handler._set_router_version(kong.cache:get("router:version"))
+        handler._set_router_version(kong.core_cache:get("router:version"))
         latest_router = {
           exec = function()
             return nil

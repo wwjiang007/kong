@@ -5,6 +5,7 @@ local Strategies   = require "kong.db.strategies"
 local MetaSchema   = require "kong.db.schema.metaschema"
 local constants    = require "kong.constants"
 local log          = require "kong.cmd.utils.log"
+local workspaces   = require "kong.workspaces"
 local utils        = require "kong.tools.utils"
 
 
@@ -212,6 +213,11 @@ function DB:truncate(table_name)
     ok, err = self.connector:truncate()
   end
 
+  -- re-create default workspace on full or workspaces truncate
+  if not table_name or table_name == "workspaces" then
+    workspaces.upsert_default()
+  end
+
   if not ok then
     return nil, prefix_err(self, err)
   end
@@ -392,24 +398,6 @@ do
 
   function DB:last_schema_state()
     return last_schema_state or self:schema_state()
-  end
-
-
-  function DB:are_014_apis_present()
-    local ok, err = self.connector:connect_migrations({ no_keyspace = true })
-    if not ok then
-      return nil, prefix_err(self, err)
-    end
-
-    ok, err = self.connector:are_014_apis_present()
-
-    self.connector:close()
-
-    if err then
-      return nil, prefix_err(self, "failed checking for presence of 0.14 apis: " .. err)
-    end
-
-    return ok
   end
 
 

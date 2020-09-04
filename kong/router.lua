@@ -16,9 +16,11 @@ local var           = ngx.var
 local ngx_log       = ngx.log
 local insert        = table.insert
 local sort          = table.sort
+local byte          = string.byte
 local upper         = string.upper
 local lower         = string.lower
 local find          = string.find
+local format        = string.format
 local sub           = string.sub
 local tonumber      = tonumber
 local ipairs        = ipairs
@@ -29,6 +31,7 @@ local max           = math.max
 local band          = bit.band
 local bor           = bit.bor
 
+local SLASH         = byte("/")
 
 local ERR           = ngx.ERR
 local WARN          = ngx.WARN
@@ -49,6 +52,103 @@ do
         tab[k] = nil
       end
     end
+  end
+end
+
+
+local split_port
+do
+  local ZERO, NINE, LEFTBRACKET, RIGHTBRACKET = ("09[]"):byte(1, -1)
+
+
+  local function safe_add_port(host, port)
+    if not port then
+      return host
+    end
+
+    return host .. ":" .. port
+  end
+
+
+  local function onlydigits(s, begin)
+    for i = begin or 1, #s do
+      local c = byte(s, i)
+      if c < ZERO or c > NINE then
+        return false
+      end
+    end
+    return true
+  end
+
+
+  --- Splits an optional ':port' section from a hostname
+  -- the port section must be decimal digits only.
+  -- brackets ('[]') are peeled off the hostname if present.
+  -- if there's more than one colon and no brackets, no split is possible.
+  -- on non-parseable input, returns name unchanged,
+  -- every string input produces at least one string output.
+  -- @tparam string name the string to split.
+  -- @tparam number default_port default port number
+  -- @treturn string hostname without port
+  -- @treturn string hostname with port
+  -- @treturn boolean true if input had a port number
+  local function l_split_port(name, default_port)
+    if byte(name, 1) == LEFTBRACKET then
+      if byte(name, -1) == RIGHTBRACKET then
+        return sub(name, 2, -2), safe_add_port(name, default_port), false
+      end
+
+      local splitpos = find(name, "]:", 2, true)
+      if splitpos then
+        if splitpos == #name - 1 then
+          return sub(name, 2, splitpos - 1), name .. (default_port or ""), false
+        end
+
+        if onlydigits(name, splitpos + 2) then
+          return sub(name, 2, splitpos - 1), name, true
+        end
+      end
+
+      return name, safe_add_port(name, default_port), false
+    end
+
+    local firstcolon = find(name, ":", 1, true)
+    if not firstcolon then
+      return name, safe_add_port(name, default_port), false
+    end
+
+    if firstcolon == #name then
+      local host = sub(name, 1, firstcolon - 1)
+      return host, safe_add_port(host, default_port), false
+    end
+
+    if not onlydigits(name, firstcolon + 1) then
+      if default_port then
+        return name, format("[%s]:%s", name, default_port), false
+      end
+
+      return name, name, false
+    end
+
+    return sub(name, 1, firstcolon - 1), name, true
+  end
+
+
+  -- split_port is a pure function, so we can memoize it.
+  local memo_h = setmetatable({}, { __mode = "k" })
+  local memo_hp = setmetatable({}, { __mode = "k" })
+  local memo_p = setmetatable({}, { __mode = "k" })
+
+
+  split_port = function(name, default_port)
+    local k = name .. "#" .. (default_port or "")
+    local h, hp, p = memo_h[k], memo_hp[k], memo_p[k]
+    if not h then
+      h, hp, p = l_split_port(name, default_port)
+      memo_h[k], memo_hp[k], memo_p[k] = h, hp, p
+    end
+
+    return h, hp, p
   end
 end
 
@@ -87,8 +187,9 @@ sort(SORTED_MATCH_RULES, function(a, b)
 end)
 
 local MATCH_SUBRULES = {
-  HAS_REGEX_URI    = 0x01,
-  PLAIN_HOSTS_ONLY = 0x02,
+  HAS_REGEX_URI          = 0x01,
+  PLAIN_HOSTS_ONLY       = 0x02,
+  HAS_WILDCARD_HOST_PORT = 0x04,
 }
 
 local EMPTY_T = {}
@@ -213,6 +314,7 @@ local function marshall_route(r)
 
     local has_host_wildcard
     local has_host_plain
+    local has_port
 
     for _, host in ipairs(hosts) do
       if type(host) ~= "string" then
@@ -225,6 +327,12 @@ local function marshall_route(r)
 
         local wildcard_host_regex = host:gsub("%.", "\\.")
                                         :gsub("%*", ".+") .. "$"
+
+        _, _, has_port = split_port(host)
+        if not has_port then
+          wildcard_host_regex = wildcard_host_regex:gsub("%$$", [[(?::\d+)?$]])
+        end
+
         insert(route_t.hosts, {
           wildcard = true,
           value    = host,
@@ -251,6 +359,11 @@ local function marshall_route(r)
     if not has_host_wildcard then
       route_t.submatch_weight = bor(route_t.submatch_weight,
                                     MATCH_SUBRULES.PLAIN_HOSTS_ONLY)
+    end
+
+    if has_port then
+      route_t.submatch_weight = bor(route_t.submatch_weight,
+                                    MATCH_SUBRULES.HAS_WILDCARD_HOST_PORT)
     end
   end
 
@@ -658,7 +771,8 @@ end
 do
   local matchers = {
     [MATCH_RULES.HOST] = function(route_t, ctx)
-      local host = route_t.hosts[ctx.hits.host or ctx.req_host]
+      local req_host = ctx.hits.host or ctx.req_host
+      local host = route_t.hosts[req_host] or route_t.hosts[ctx.host_no_port]
       if host then
         ctx.matches.host = host
         return true
@@ -668,7 +782,7 @@ do
         local host_t = route_t.hosts[i]
 
         if host_t.wildcard then
-          local from, _, err = re_find(ctx.req_host, host_t.regex, "ajo")
+          local from, _, err = re_find(ctx.host_with_port, host_t.regex, "ajo")
           if err then
             log(ERR, "could not evaluate wildcard host regex: ", err)
             return
@@ -732,8 +846,10 @@ do
               ctx.matches.uri = uri_t.value
 
               if m.uri_postfix then
+                ctx.matches.uri_prefix = sub(ctx.req_uri, 1, -(#m.uri_postfix + 1))
+
                 -- remove the uri_postfix group
-                m[#m]          = nil
+                m[#m] = nil
                 m.uri_postfix = nil
               end
 
@@ -746,6 +862,7 @@ do
           end
 
           -- plain or prefix match from the index
+          ctx.matches.uri_prefix = sub(ctx.req_uri, 1, #uri_t.value)
           ctx.matches.uri_postfix = sub(ctx.req_uri, #uri_t.value + 1)
           ctx.matches.uri = uri_t.value
 
@@ -768,8 +885,10 @@ do
             ctx.matches.uri = uri_t.value
 
             if m.uri_postfix then
+              ctx.matches.uri_prefix = sub(ctx.req_uri, 1, -(#m.uri_postfix + 1))
+
               -- remove the uri_postfix group
-              m[#m]          = nil
+              m[#m] = nil
               m.uri_postfix = nil
             end
 
@@ -784,6 +903,7 @@ do
           -- plain or prefix match (not from the index)
           local from, to = find(ctx.req_uri, uri_t.value, nil, true)
           if from == 1 then
+            ctx.matches.uri_prefix = sub(ctx.req_uri, 1, to)
             ctx.matches.uri_postfix = sub(ctx.req_uri, to + 1)
             ctx.matches.uri = uri_t.value
 
@@ -992,6 +1112,7 @@ _M.has_capturing_groups = has_capturing_groups
 
 -- for unit-testing purposes only
 _M._set_ngx = _set_ngx
+_M.split_port = split_port
 
 
 function _M.new(routes)
@@ -1036,6 +1157,9 @@ function _M.new(routes)
   -- iterations over sets of routes per request
   local categories = {}
 
+  -- all routes indexed by id
+  local routes_by_id = {}
+
 
   local cache = lrucache.new(MATCH_LRUCACHE_SIZE)
 
@@ -1046,12 +1170,35 @@ function _M.new(routes)
     local marshalled_routes = {}
 
     for i = 1, #routes do
-      local route_t, err = marshall_route(routes[i])
-      if not route_t then
-        return nil, err
+
+      local route = utils.deep_copy(routes[i], false)
+      local paths = utils.deep_copy(route.route.paths, false)
+      if paths ~= nil and #paths > 1 then
+        -- split routes by paths to sort properly
+        for j = 1, #paths do
+          local index = #marshalled_routes + 1
+          local err
+
+          route.route.paths = { paths[j] }
+          marshalled_routes[index], err = marshall_route(route)
+          if not marshalled_routes[index] then
+            return nil, err
+          end
+        end
+
+      else
+        local index = #marshalled_routes + 1
+        local err
+
+        marshalled_routes[index], err = marshall_route(route)
+        if not marshalled_routes[index] then
+          return nil, err
+        end
       end
 
-      marshalled_routes[i] = route_t
+      if routes[i].route.id ~= nil then
+        routes_by_id[routes[i].route.id] = routes[i]
+      end
     end
 
     -- sort wildcard hosts and uri regexes since those rules
@@ -1164,7 +1311,7 @@ function _M.new(routes)
 
   local grab_req_headers = #plain_indexes.headers > 0
 
-  local function find_route(req_method, req_uri, req_host,
+  local function find_route(req_method, req_uri, req_host, req_scheme,
                             src_ip, src_port,
                             dst_ip, dst_port,
                             sni, req_headers)
@@ -1176,6 +1323,9 @@ function _M.new(routes)
     end
     if req_host and type(req_host) ~= "string" then
       error("host must be a string", 2)
+    end
+    if req_scheme and type(req_scheme) ~= "string" then
+      error("scheme must be a string", 2)
     end
     if src_ip and type(src_ip) ~= "string" then
       error("src_ip must be a string", 2)
@@ -1211,20 +1361,6 @@ function _M.new(routes)
     ctx.dst_port       = dst_port or ""
     ctx.sni            = sni or ""
 
-    -- cache lookup (except for headers-matched Routes)
-
-    local cache_key = req_method .. "|" .. req_uri .. "|" .. req_host ..
-                      "|" .. ctx.src_ip .. "|" .. ctx.src_port ..
-                      "|" .. ctx.dst_ip .. "|" .. ctx.dst_port ..
-                      "|" .. ctx.sni
-
-    do
-      local match_t = cache:get(cache_key)
-      if match_t then
-        return match_t
-      end
-    end
-
     -- input sanitization for matchers
 
     -- hosts
@@ -1233,13 +1369,15 @@ function _M.new(routes)
 
     req_method = upper(req_method)
 
-    if req_host ~= "" then
-      -- strip port number if given because matching ignores ports
-      local idx = find(req_host, ":", 2, true)
-      if idx then
-        ctx.req_host = sub(req_host, 1, idx - 1)
-      end
-    end
+    -- req_host might have port or maybe not, host_no_port definitely doesn't
+    -- if there wasn't a port, req_port is assumed to be the default port
+    -- according the protocol scheme
+    local host_no_port, host_with_port = split_port(req_host,
+                                                    req_scheme == "https"
+                                                    and 443 or 80)
+
+    ctx.host_with_port = host_with_port
+    ctx.host_no_port   = host_no_port
 
     local hits         = ctx.hits
     local req_category = 0x00
@@ -1250,14 +1388,42 @@ function _M.new(routes)
     --
     -- determine which category this request *might* be targeting
 
+    -- header match
+
+    for _, header_name in ipairs(plain_indexes.headers) do
+      if req_headers[header_name] then
+        req_category = bor(req_category, MATCH_RULES.HEADER)
+        hits.header_name = header_name
+        break
+      end
+    end
+
+    -- cache lookup (except for headers-matched Routes)
+    -- if trigger headers match rule, ignore routes cache
+
+    local cache_key = req_method .. "|" .. req_uri .. "|" .. req_host ..
+                      "|" .. ctx.src_ip .. "|" .. ctx.src_port ..
+                      "|" .. ctx.dst_ip .. "|" .. ctx.dst_port ..
+                      "|" .. ctx.sni
+
+    do
+      local match_t = cache:get(cache_key)
+      if match_t and hits.header_name == nil then
+        return match_t
+      end
+    end
+
     -- host match
 
-    if plain_indexes.hosts[ctx.req_host] then
+    if plain_indexes.hosts[host_with_port]
+      or plain_indexes.hosts[host_no_port]
+    then
       req_category = bor(req_category, MATCH_RULES.HOST)
 
     elseif ctx.req_host then
       for i = 1, #wildcard_hosts do
-        local from, _, err = re_find(ctx.req_host, wildcard_hosts[i].regex, "ajo")
+        local from, _, err = re_find(host_with_port, wildcard_hosts[i].regex,
+                                     "ajo")
         if err then
           log(ERR, "could not match wildcard host: ", err)
           return
@@ -1271,41 +1437,34 @@ function _M.new(routes)
       end
     end
 
-    -- header match
+    -- uri match
 
-    for _, header_name in ipairs(plain_indexes.headers) do
-      if req_headers[header_name] then
-        req_category = bor(req_category, MATCH_RULES.HEADER)
-        hits.header_name = header_name
+    for i = 1, #regex_uris do
+      local from, _, err = re_find(req_uri, regex_uris[i].regex, "ajo")
+      if err then
+        log(ERR, "could not evaluate URI regex: ", err)
+        return
+      end
+
+      if from then
+        hits.uri     = regex_uris[i].value
+        req_category = bor(req_category, MATCH_RULES.URI)
         break
       end
     end
 
-    -- uri match
+    if not hits.uri then
+      if plain_indexes.uris[req_uri] then
+        hits.uri     = req_uri
+        req_category = bor(req_category, MATCH_RULES.URI)
 
-    if plain_indexes.uris[req_uri] then
-      req_category = bor(req_category, MATCH_RULES.URI)
-
-    else
-      for i = 1, #prefix_uris do
-        if find(req_uri, prefix_uris[i].value, nil, true) == 1 then
-          hits.uri     = prefix_uris[i].value
-          req_category = bor(req_category, MATCH_RULES.URI)
-          break
-        end
-      end
-
-      for i = 1, #regex_uris do
-        local from, _, err = re_find(req_uri, regex_uris[i].regex, "ajo")
-        if err then
-          log(ERR, "could not evaluate URI regex: ", err)
-          return
-        end
-
-        if from then
-          hits.uri     = regex_uris[i].value
-          req_category = bor(req_category, MATCH_RULES.URI)
-          break
+      else
+        for i = 1, #prefix_uris do
+          if find(req_uri, prefix_uris[i].value, nil, true) == 1 then
+            hits.uri     = prefix_uris[i].value
+            req_category = bor(req_category, MATCH_RULES.URI)
+            break
+          end
         end
       end
     end
@@ -1403,29 +1562,88 @@ function _M.new(routes)
             local upstream_url_t = matched_route.upstream_url_t
             local matches        = ctx.matches
 
+            if matched_route.route.id and routes_by_id[matched_route.route.id].route then
+              matched_route.route = routes_by_id[matched_route.route.id].route
+            end
+
+            local request_prefix
+
             -- Path construction
 
             if matched_route.type == "http" then
+              request_prefix = matched_route.strip_uri and matches.uri_prefix or nil
+
               -- if we do not have a path-match, then the postfix is simply the
               -- incoming path, without the initial slash
               local request_postfix = matches.uri_postfix or sub(req_uri, 2, -1)
               local upstream_base = upstream_url_t.path or "/"
 
-              if matched_route.strip_uri then
-                -- we drop the matched part, replacing it with the upstream path
-                if sub(upstream_base, -1, -1) == "/" and
-                   sub(request_postfix, 1, 1) == "/" then
-                  -- double "/", so drop the first
-                  upstream_uri = sub(upstream_base, 1, -2) .. request_postfix
+              if matched_route.route.path_handling == "v1" then
+                if matched_route.strip_uri then
+                  -- we drop the matched part, replacing it with the upstream path
+                  if byte(upstream_base, -1) == SLASH and
+                     byte(request_postfix, 1) == SLASH then
+                    -- double "/", so drop the first
+                    upstream_uri = sub(upstream_base, 1, -2) .. request_postfix
+
+                  else
+                    upstream_uri = upstream_base .. request_postfix
+                  end
 
                 else
-                  upstream_uri = upstream_base .. request_postfix
+                  -- we retain the incoming path, just prefix it with the upstream
+                  -- path, but skip the initial slash
+                  upstream_uri = upstream_base .. sub(req_uri, 2, -1)
                 end
 
-              else
-                -- we retain the incoming path, just prefix it with the upstream
-                -- path, but skip the initial slash
-                upstream_uri = upstream_base .. sub(req_uri, 2, -1)
+              else -- matched_route.route.path_handling == "v0"
+                if byte(upstream_base, -1) == SLASH then
+                  -- ends with / and strip_uri = true
+                  if matched_route.strip_uri then
+                    if request_postfix == "" then
+                      if upstream_base == "/" then
+                        upstream_uri = "/"
+                      elseif byte(req_uri, -1) == SLASH then
+                        upstream_uri = upstream_base
+                      else
+                        upstream_uri = sub(upstream_base, 1, -2)
+                      end
+                    elseif byte(request_postfix, 1, 1) == SLASH then
+                      -- double "/", so drop the first
+                      upstream_uri = sub(upstream_base, 1, -2) .. request_postfix
+                    else -- ends with / and strip_uri = true, no double slash
+                      upstream_uri = upstream_base .. request_postfix
+                    end
+
+                  else -- ends with / and strip_uri = false
+                    -- we retain the incoming path, just prefix it with the upstream
+                    -- path, but skip the initial slash
+                    upstream_uri = upstream_base .. sub(req_uri, 2)
+                  end
+
+                else -- does not end with /
+                  -- does not end with / and strip_uri = true
+                  if matched_route.strip_uri then
+                    if request_postfix == "" then
+                      if #req_uri > 1 and byte(req_uri, -1) == SLASH then
+                        upstream_uri = upstream_base .. "/"
+                      else
+                        upstream_uri = upstream_base
+                      end
+                    elseif byte(request_postfix, 1, 1) == SLASH then
+                      upstream_uri = upstream_base .. request_postfix
+                    else
+                      upstream_uri = upstream_base .. "/" .. request_postfix
+                    end
+
+                  else -- does not end with / and strip_uri = false
+                    if req_uri == "/" then
+                      upstream_uri = upstream_base
+                    else
+                      upstream_uri = upstream_base .. req_uri
+                    end
+                  end
+                end
               end
 
               -- preserve_host header logic
@@ -1443,6 +1661,7 @@ function _M.new(routes)
               upstream_scheme = upstream_url_t.scheme,
               upstream_uri    = upstream_uri,
               upstream_host   = upstream_host,
+              prefix          = request_prefix,
               matches         = {
                 uri_captures  = matches.uri_captures,
                 uri           = matches.uri,
@@ -1482,6 +1701,7 @@ function _M.new(routes)
       local req_method = get_method()
       local req_uri = var.request_uri
       local req_host = var.http_host or ""
+      local req_scheme = var.scheme
       local sni = var.ssl_server_name
 
       local headers
@@ -1504,7 +1724,7 @@ function _M.new(routes)
         end
       end
 
-      local match_t = find_route(req_method, req_uri, req_host,
+      local match_t = find_route(req_method, req_uri, req_host, req_scheme,
                                  nil, nil, -- src_ip, src_port
                                  nil, nil, -- dst_ip, dst_port
                                  sni, headers)
@@ -1540,14 +1760,18 @@ function _M.new(routes)
     end
 
   else -- stream
+    local server_name = require("ngx.ssl").server_name
+
     function self.exec()
       local src_ip = var.remote_addr
       local src_port = tonumber(var.remote_port, 10)
       local dst_ip = var.server_addr
-      local dst_port = tonumber(var.server_port, 10)
-      local sni = var.ssl_preread_server_name
+      local dst_port = tonumber(ngx.ctx.host_port, 10)
+                    or tonumber(var.server_port, 10)
+      -- error value for non-TLS connections ignored intentionally
+      local sni, _ = server_name()
 
-      return find_route(nil, nil, nil,
+      return find_route(nil, nil, nil, nil,
                         src_ip, src_port,
                         dst_ip, dst_port,
                         sni)

@@ -103,7 +103,6 @@ local function add_top_level_entities(fields, entities)
     definition.endpoint_key = nil
     definition.cache_key = nil
     definition.cache_key_set = nil
-    definition.ttl = nil
     records[entity] = definition
     add_extra_attributes(records[entity].fields, {
       _comment = true,
@@ -121,8 +120,12 @@ local function add_top_level_entities(fields, entities)
 end
 
 
-local function copy_without_foreign(record)
+local function copy_record(record, include_foreign)
   local copy = utils.deep_copy(record, false)
+  if include_foreign then
+    return copy
+  end
+
   for i = #copy.fields, 1, -1 do
     local f = copy.fields[i]
     local _, fdata = next(f)
@@ -144,10 +147,10 @@ end
 -- (e.g. `service` as a string key in the `routes` entry).
 -- @tparam map<string,table> records A map of top-level record definitions,
 -- indexable by entity name. These records are modified in-place.
-local function nest_foreign_relationships(records)
+local function nest_foreign_relationships(records, include_foreign)
   for entity, record in pairs(records) do
     for _, f in ipairs(record.fields) do
-      local fname, fdata = next(f)
+      local _, fdata = next(f)
       if fdata.type == "foreign" then
         local ref = fdata.reference
         -- allow nested entities
@@ -155,7 +158,7 @@ local function nest_foreign_relationships(records)
         table.insert(records[ref].fields, {
           [entity] = {
             type = "array",
-            elements = copy_without_foreign(record, fname),
+            elements = copy_record(record, include_foreign),
           },
         })
       end
@@ -187,9 +190,10 @@ local function reference_foreign_by_name(records)
 end
 
 
-local function build_fields(entities)
+local function build_fields(entities, include_foreign)
   local fields = {
-    { _format_version = { type = "string", required = true, eq = "1.1" } },
+    { _format_version = { type = "string", required = true, one_of = {"1.1", "2.1"} } },
+    { _transform = { type = "boolean", default = true } },
   }
   add_extra_attributes(fields, {
     _comment = true,
@@ -197,14 +201,19 @@ local function build_fields(entities)
   })
 
   local records = add_top_level_entities(fields, entities)
-  nest_foreign_relationships(records)
+  nest_foreign_relationships(records, include_foreign)
 
   return fields, records
 end
 
 
 local function load_plugin_subschemas(fields, plugin_set, indent)
+  if not fields then
+    return true
+  end
+
   indent = indent or 0
+
   for _, f in ipairs(fields) do
     local fname, fdata = next(f)
 
@@ -440,6 +449,8 @@ local function get_key_for_uuid_gen(entity, item, schema, parent_fk, child_key)
   if schema.cache_key then
     return pk_name, build_cache_key(entity, item, schema, parent_fk, child_key)
   end
+
+  return pk_name
 end
 
 
@@ -477,45 +488,170 @@ local function generate_ids(input, known_entities, parent_entity)
 end
 
 
-local function flatten(self, input)
-  local output = {}
+local function populate_ids_for_validation(input, known_entities, parent_entity, by_id, by_key)
+  local by_id  = by_id  or {}
+  local by_key = by_key or {}
+  for _, entity in ipairs(known_entities) do
+    if type(input[entity]) ~= "table" then
+      goto continue
+    end
 
-    -- This may give invalid errors as it validates input that does not have
-  -- foreign keys filled (e.g. basicauth_credentials fail on this with this
-  -- config:
-  --
-  --   consumers:
-  --     username: consumer
-  --     basicauth_credentials:
-  --     - username: username
-  --       password: password
-  --
-  -- because it tries to validate the credential that has no consumer.id at
-  -- this point filled in, and transformation implicitly adds mutually_required
-  -- check on that entity.
-  --
-  -- As a short-term solution, we don't error right away here.
+    local parent_fk
+    local child_key
+    if parent_entity then
+      local parent_schema = all_schemas[parent_entity]
+      if parent_schema.fields[entity] then
+        goto continue
+      end
+      parent_fk = parent_schema:extract_pk_values(input)
+      child_key = foreign_children[parent_entity][entity]
+    end
+
+    local schema = all_schemas[entity]
+    for _, item in ipairs(input[entity]) do
+      local pk_name, key = get_key_for_uuid_gen(entity, item, schema,
+                                                parent_fk, child_key)
+      if pk_name and not item[pk_name] then
+        if key then
+          item[pk_name] = generate_uuid(schema.name, key)
+        else
+          item[pk_name] = utils.uuid()
+        end
+      end
+
+      populate_ids_for_validation(item, known_entities, entity, by_id, by_key)
+
+      local item_id = DeclarativeConfig.pk_string(schema, item)
+      by_id[entity] = by_id[entity] or {}
+      by_id[entity][item_id] = item
+
+      local key
+      if schema.endpoint_key then
+        key = item[schema.endpoint_key]
+        if key then
+          by_key[entity] = by_key[entity] or {}
+          by_key[entity][key] = item
+        end
+      end
+
+      if parent_fk and not item[child_key] then
+        item[child_key] = utils.deep_copy(parent_fk, false)
+      end
+    end
+
+    ::continue::
+  end
+
+  if not parent_entity then
+    for entity, entries in pairs(by_id) do
+      local schema = all_schemas[entity]
+      for _, entry in pairs(entries) do
+        for name, field in schema:each_field(entry) do
+          if field.type == "foreign" and type(entry[name]) == "string" then
+            local found = find_entity(entry[name], field.reference, by_key, by_id)
+            if found then
+              entry[name] = all_schemas[field.reference]:extract_pk_values(found)
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+
+local function extract_null_errors(err)
+  local ret = {}
+  for k, v in pairs(err) do
+    local t = type(v)
+    if t == "table" then
+      local res = extract_null_errors(v)
+      if not next(res) then
+        ret[k] = nil
+      else
+        ret[k] = res
+      end
+
+    elseif t == "string" and v ~= "value must be null" then
+      ret[k] = nil
+    else
+      ret[k] = v
+    end
+  end
+
+  return ret
+end
+
+
+local function find_default_ws(entities)
+  for k, v in pairs(entities.workspaces or {}) do
+    if v.name == "default" then return v.id end
+  end
+end
+
+
+local function insert_default_workspace_if_not_given(self, entities)
+  local default_workspace = find_default_ws(entities) or "0dc6f45b-8f8d-40d2-a504-473544ee190b"
+
+  if not entities.workspaces then
+    entities.workspaces = {}
+  end
+
+  if not entities.workspaces[default_workspace] then
+    local entity = all_schemas["workspaces"]:process_auto_fields({
+      name = "default",
+      id = default_workspace,
+    }, "insert")
+    entities.workspaces[default_workspace] = entity
+  end
+end
+
+
+local function flatten(self, input)
+  -- manually set transform here
+  -- we can't do this in the schema with a `default` because validate
+  -- needs to happen before process_auto_fields, which
+  -- is the one in charge of filling out default values
+  if input._transform == nil then
+    input._transform = true
+  end
+
   local ok, err = self:validate(input)
+  if not ok then
+    -- the error may be due entity validation that depends on foreign entity,
+    -- and that is the reason why we try to validate the input again with the
+    -- filled foreign keys
+    local input_copy = utils.deep_copy(input, false)
+    populate_ids_for_validation(input_copy, self.known_entities)
+    local schema = DeclarativeConfig.load(self.plugin_set, true)
+
+    local ok2, err2 = schema:validate(input_copy)
+    if not ok2 then
+      local err3 = utils.deep_merge(err2, extract_null_errors(err))
+      return nil, err3
+    end
+  end
 
   generate_ids(input, self.known_entities)
 
   local processed = self:process_auto_fields(input, "insert")
 
-  local by_id, by_key_or_err = validate_references(self, processed)
+  local by_id, by_key = validate_references(self, processed)
   if not by_id then
-    -- let's return original error in case it is defined, as the reference
-    -- validation could have failed because of that.
-    if not ok then
-      return nil, err
-    end
-
-    return nil, by_key_or_err
+    return nil, by_key
   end
-  local by_key = by_key_or_err
 
+  local meta = {}
+  for key, value in pairs(processed) do
+    if key:sub(1,1) == "_" then
+      meta[key] = value
+    end
+  end
+
+  local entities = {}
   for entity, entries in pairs(by_id) do
     local schema = all_schemas[entity]
-    output[entity] = {}
+    entities[entity] = {}
     for id, entry in pairs(entries) do
       local flat_entry = {}
       for name, field in schema:each_field(entry) do
@@ -530,49 +666,11 @@ local function flatten(self, input)
         end
       end
 
-      -- TODO: is the plugin not enabled a sign of something wrong somewhere?
-      local ok2, err2 = schema:validate(flat_entry)
-      if not ok2
-         and err2
-         and err2.name ~= string.format("plugin '%s' not enabled; add it to " ..
-                                        "the 'plugins' configuration property",
-                                        flat_entry.name)
-        then
-
-        if err then
-          if err2["@entity"] then
-            for _, errmsg2 in ipairs(err2["@entity"]) do
-              local found
-              if err["@entity"] then
-                for _, errmsg in ipairs(err["@entity"]) do
-                  if errmsg2 == errmsg then
-                    found = true
-                    break
-                  end
-                end
-              end
-
-              if not found then
-                if not err["@entity"] then
-                  err["@entity"] = {}
-                end
-
-                table.insert(err["@entity"], errmsg2)
-              end
-            end
-          end
-
-          return nil, err
-        end
-
-        return nil, err2
-      end
-
-      output[entity][id] = flat_entry
+      entities[entity][id] = flat_entry
     end
   end
 
-  return output
+  return entities, nil, meta
 end
 
 
@@ -591,7 +689,7 @@ local function load_entity_subschemas(entity_name, entity)
 end
 
 
-function DeclarativeConfig.load(plugin_set)
+function DeclarativeConfig.load(plugin_set, include_foreign)
   if not core_entities then
     -- a copy of constants.CORE_ENTITIES without "tags"
     core_entities = {}
@@ -604,16 +702,14 @@ function DeclarativeConfig.load(plugin_set)
 
   local known_entities = utils.deep_copy(core_entities, false)
 
-  if not all_schemas then
-    all_schemas = {}
-    for _, entity in ipairs(core_entities) do
-      local mod = require("kong.db.schema.entities." .. entity)
-      local definition = utils.deep_copy(mod, false)
-      all_schemas[entity] = Entity.new(definition)
+  all_schemas = {}
+  for _, entity in ipairs(core_entities) do
+    local mod = require("kong.db.schema.entities." .. entity)
+    local definition = utils.deep_copy(mod, false)
+    all_schemas[entity] = Entity.new(definition)
 
-      -- load core entities subschemas
-      assert(load_entity_subschemas(entity, all_schemas[entity]))
-    end
+    -- load core entities subschemas
+    assert(load_entity_subschemas(entity, all_schemas[entity]))
   end
 
   for plugin in pairs(plugin_set) do
@@ -628,7 +724,7 @@ function DeclarativeConfig.load(plugin_set)
     end
   end
 
-  local fields, records = build_fields(known_entities)
+  local fields, records = build_fields(known_entities, include_foreign)
   -- assert(no_foreign(fields))
 
   local ok, err = load_plugin_subschemas(fields, plugin_set)
@@ -639,7 +735,9 @@ function DeclarativeConfig.load(plugin_set)
   -- we replace the "foreign"-type fields at the top-level
   -- with "string"-type fields only after the subschemas have been loaded,
   -- otherwise they will detect the mismatch.
-  reference_foreign_by_name(records)
+  if not include_foreign then
+    reference_foreign_by_name(records)
+  end
 
   local def = {
     name = "declarative_config",
@@ -651,6 +749,8 @@ function DeclarativeConfig.load(plugin_set)
 
   schema.known_entities = known_entities
   schema.flatten = flatten
+  schema.insert_default_workspace_if_not_given = insert_default_workspace_if_not_given
+  schema.plugin_set = plugin_set
 
   return schema, nil, def
 end

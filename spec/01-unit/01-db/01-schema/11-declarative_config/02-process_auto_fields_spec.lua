@@ -23,6 +23,7 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           services = {}
         }, config)
       end)
@@ -47,6 +48,7 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           services = {
             {
               name = "foo",
@@ -87,6 +89,7 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           services = {
             {
               name = "foo",
@@ -113,6 +116,7 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           plugins = {}
         }, config)
       end)
@@ -135,13 +139,13 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           plugins = {
             {
               _comment = "my comment",
               _ignore = { { foo = "bar" } },
               name = "key-auth",
               enabled = true,
-              run_on = "first",
               protocols = { "grpc", "grpcs", "http", "https" },
               config = {
                 hide_credentials = false,
@@ -155,7 +159,6 @@ describe("declarative config: process_auto_fields", function()
               _ignore = { { foo = "bar" } },
               name = "http-log",
               enabled = true,
-              run_on = "first",
               protocols = { "grpc", "grpcs", "http", "https" },
               config = {
                 http_endpoint = "https://example.com",
@@ -187,12 +190,12 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           plugins = {
             {
               route = "foo",
               name = "key-auth",
               enabled = true,
-              run_on = "first",
               protocols = { "grpc", "grpcs", "http", "https" },
               config = {
                 hide_credentials = false,
@@ -206,7 +209,6 @@ describe("declarative config: process_auto_fields", function()
               consumer = "my-consumer",
               name = "http-log",
               enabled = true,
-              run_on = "first",
               protocols = { "grpc", "grpcs", "http", "https" },
               config = {
                 http_endpoint = "https://example.com",
@@ -237,6 +239,7 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             services = {
               {
                 name = "foo",
@@ -284,6 +287,7 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             services = {
               {
                 name = "foo",
@@ -302,7 +306,6 @@ describe("declarative config: process_auto_fields", function()
                     _ignore = { { foo = "bar" } },
                     name = "key-auth",
                     enabled = true,
-                    run_on = "first",
                     protocols = { "grpc", "grpcs", "http", "https" },
                     config = {
                       hide_credentials = false,
@@ -314,7 +317,6 @@ describe("declarative config: process_auto_fields", function()
                   {
                     name = "http-log",
                     enabled = true,
-                    run_on = "first",
                     protocols = { "grpc", "grpcs", "http", "https" },
                     config = {
                       http_endpoint = "https://example.com",
@@ -342,7 +344,6 @@ describe("declarative config: process_auto_fields", function()
                   {
                     name = "basic-auth",
                     enabled = true,
-                    run_on = "first",
                     protocols = { "grpc", "grpcs", "http", "https" },
                     config = {
                       hide_credentials = false,
@@ -351,7 +352,6 @@ describe("declarative config: process_auto_fields", function()
                   {
                     name = "tcp-log",
                     enabled = true,
-                    run_on = "first",
                     protocols = { "grpc", "grpcs", "http", "https" },
                     config = {
                       host = "127.0.0.1",
@@ -380,6 +380,7 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             services = {
               {
                 name = "foo",
@@ -404,16 +405,20 @@ describe("declarative config: process_auto_fields", function()
               host: example.com
               protocol: https
               routes:
-                - paths:
+                - path_handling: v1
+                  paths:
                   - /path
-                - hosts:
+                - path_handling: v1
+                  hosts:
                   - example.com
-                - methods: ["GET", "POST"]
+                - path_handling: v1
+                  methods: ["GET", "POST"]
             - name: bar
               host: example.test
               port: 3000
               routes:
-                - paths:
+                - path_handling: v1
+                  paths:
                   - /path
                   hosts:
                   - example.com
@@ -422,6 +427,7 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             services = {
               {
                 name = "foo",
@@ -438,6 +444,7 @@ describe("declarative config: process_auto_fields", function()
                     preserve_host = false,
                     regex_priority = 0,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     https_redirect_status_code = 426,
                   },
@@ -446,6 +453,7 @@ describe("declarative config: process_auto_fields", function()
                     preserve_host = false,
                     regex_priority = 0,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     https_redirect_status_code = 426,
                   },
@@ -454,6 +462,7 @@ describe("declarative config: process_auto_fields", function()
                     preserve_host = false,
                     regex_priority = 0,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     https_redirect_status_code = 426,
                   },
@@ -476,6 +485,7 @@ describe("declarative config: process_auto_fields", function()
                     preserve_host = false,
                     regex_priority = 0,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     https_redirect_status_code = 426,
                   },
@@ -496,12 +506,14 @@ describe("declarative config: process_auto_fields", function()
               protocol: https
               routes:
               - name: foo
+                path_handling: v1
                 methods: ["GET"]
                 plugins:
           ]]))
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             services = {
               {
                 name = "foo",
@@ -518,6 +530,7 @@ describe("declarative config: process_auto_fields", function()
                     methods = { "GET" },
                     preserve_host = false,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     regex_priority = 0,
                     https_redirect_status_code = 426,
@@ -538,6 +551,7 @@ describe("declarative config: process_auto_fields", function()
               protocol: https
               routes:
               - name: foo
+                path_handling: v1
                 methods: ["GET"]
                 plugins:
                   - name: key-auth
@@ -549,6 +563,7 @@ describe("declarative config: process_auto_fields", function()
               port: 3000
               routes:
               - name: bar
+                path_handling: v1
                 paths:
                 - /
                 plugins:
@@ -561,6 +576,7 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             services = {
               {
                 name = "foo",
@@ -577,6 +593,7 @@ describe("declarative config: process_auto_fields", function()
                     methods = { "GET" },
                     preserve_host = false,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     regex_priority = 0,
                     https_redirect_status_code = 426,
@@ -584,7 +601,6 @@ describe("declarative config: process_auto_fields", function()
                       {
                         name = "key-auth",
                         enabled = true,
-                        run_on = "first",
                         protocols = { "grpc", "grpcs", "http", "https" },
                         config = {
                           hide_credentials = false,
@@ -596,7 +612,6 @@ describe("declarative config: process_auto_fields", function()
                       {
                         name = "http-log",
                         enabled = true,
-                        run_on = "first",
                         protocols = { "grpc", "grpcs", "http", "https" },
                         config = {
                           http_endpoint = "https://example.com",
@@ -628,6 +643,7 @@ describe("declarative config: process_auto_fields", function()
                     paths = { "/" },
                     preserve_host = false,
                     strip_path = true,
+                    path_handling = "v1",
                     protocols = { "http", "https" },
                     regex_priority = 0,
                     https_redirect_status_code = 426,
@@ -635,7 +651,6 @@ describe("declarative config: process_auto_fields", function()
                       {
                         name = "basic-auth",
                         enabled = true,
-                        run_on = "first",
                         protocols = { "grpc", "grpcs", "http", "https" },
                         config = {
                           hide_credentials = false,
@@ -644,7 +659,6 @@ describe("declarative config: process_auto_fields", function()
                       {
                         name = "tcp-log",
                         enabled = true,
-                        run_on = "first",
                         protocols = { "grpc", "grpcs", "http", "https" },
                         config = {
                           host = "127.0.0.1",
@@ -675,6 +689,7 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           oauth2_credentials = {}
         }, config)
       end)
@@ -694,15 +709,20 @@ describe("declarative config: process_auto_fields", function()
         config = DeclarativeConfig:process_auto_fields(config, "select", false)
         assert.same({
           _format_version = "1.1",
+          _transform = true,
           oauth2_credentials = {
             {
+              client_type = "confidential",
               name = "my-credential",
               redirect_uris = { "https://example.com" },
+              hash_secret = false,
             },
             {
+              client_type = "confidential",
               name = "another-credential",
               consumer = "foo",
               redirect_uris = { "https://example.test" },
+              hash_secret = false,
             },
           }
         }, config)
@@ -721,6 +741,7 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             consumers = {
               {
                 username = "bob",
@@ -746,17 +767,22 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             consumers = {
               {
                 username = "bob",
                 oauth2_credentials = {
                   {
+                    client_type = "confidential",
                     name = "my-credential",
                     redirect_uris = { "https://example.com" },
+                    hash_secret = false,
                   },
                   {
+                    client_type = "confidential",
                     name = "another-credential",
                     redirect_uris = { "https://example.test" },
+                    hash_secret = false,
                   },
                 }
               }
@@ -778,11 +804,14 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             oauth2_credentials = {
               {
+                client_type = "confidential",
                 name = "my-credential",
                 redirect_uris = { "https://example.com" },
-                oauth2_tokens = {}
+                oauth2_tokens = {},
+                hash_secret = false,
               },
             }
           }, config)
@@ -803,10 +832,13 @@ describe("declarative config: process_auto_fields", function()
           config = DeclarativeConfig:process_auto_fields(config, "select", false)
           assert.same({
             _format_version = "1.1",
+            _transform = true,
             oauth2_credentials = {
               {
+                client_type = "confidential",
                 name = "my-credential",
                 redirect_uris = { "https://example.com" },
+                hash_secret = false,
                 oauth2_tokens = {
                   {
                     expires_in = 1,

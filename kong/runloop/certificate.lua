@@ -1,64 +1,64 @@
 local singletons = require "kong.singletons"
 local ngx_ssl = require "ngx.ssl"
-local http_tls = require "http.tls"
-local openssl_pkey = require "openssl.pkey"
-local openssl_x509 = require "openssl.x509"
 local pl_utils = require "pl.utils"
 local mlcache = require "resty.mlcache"
+local new_tab = require "table.new"
+local openssl_x509_store = require "resty.openssl.x509.store"
+local openssl_x509 = require "resty.openssl.x509"
+
+if jit.arch == 'arm64' then
+  jit.off(mlcache.get_bulk)        -- "temporary" workaround for issue #5748 on ARM
+end
 
 
-local ngx_log = ngx.log
-local ERR     = ngx.ERR
-local DEBUG   = ngx.DEBUG
-local re_sub  = ngx.re.sub
-local find    = string.find
+
+local ngx_log     = ngx.log
+local ERR         = ngx.ERR
+local DEBUG       = ngx.DEBUG
+local re_sub      = ngx.re.sub
+local find        = string.find
+local server_name = ngx_ssl.server_name
+local clear_certs = ngx_ssl.clear_certs
+local parse_pem_cert = ngx_ssl.parse_pem_cert
+local parse_pem_priv_key = ngx_ssl.parse_pem_priv_key
+local set_cert = ngx_ssl.set_cert
+local set_priv_key = ngx_ssl.set_priv_key
+local tb_concat   = table.concat
+local tb_sort   = table.sort
+local tostring = tostring
+local ipairs = ipairs
+local ngx_md5 = ngx.md5
 
 
 local default_cert_and_key
-local parse_key_and_cert
 
+local DEFAULT_SNI = "*"
 
 local function log(lvl, ...)
   ngx_log(lvl, "[ssl] ", ...)
 end
 
-
-if ngx.config.subsystem == "http" then
-  parse_key_and_cert = function(row)
-    if row == false then
-      return default_cert_and_key
-    end
-
-    -- parse cert and priv key for later usage by ngx.ssl
-
-    local cert, err = ngx_ssl.parse_pem_cert(row.cert)
-    if not cert then
-      return nil, "could not parse PEM certificate: " .. err
-    end
-
-    local key, err = ngx_ssl.parse_pem_priv_key(row.key)
-    if not key then
-      return nil, "could not parse PEM private key: " .. err
-    end
-
-    return {
-      cert = cert,
-      key = key,
-    }
+local function parse_key_and_cert(row)
+  if row == false then
+    return default_cert_and_key
   end
 
-else
-  parse_key_and_cert = function(row)
-    if row == false then
-      return default_cert_and_key
-    end
+  -- parse cert and priv key for later usage by ngx.ssl
 
-    local ssl_termination_ctx = http_tls.new_server_context()
-    ssl_termination_ctx:setCertificate(openssl_x509.new(row.cert))
-    ssl_termination_ctx:setPrivateKey(openssl_pkey.new(row.key))
-
-    return ssl_termination_ctx
+  local cert, err = parse_pem_cert(row.cert)
+  if not cert then
+    return nil, "could not parse PEM certificate: " .. err
   end
+
+  local key, err = parse_pem_priv_key(row.key)
+  if not key then
+    return nil, "could not parse PEM private key: " .. err
+  end
+
+  return {
+    cert = cert,
+    key = key,
+  }
 end
 
 
@@ -147,6 +147,30 @@ local get_certificate_opts = {
 }
 
 
+local get_ca_store_opts = {
+  l1_serializer = function(cas)
+    local trust_store, err = openssl_x509_store.new()
+    if err then
+      return nil, err
+    end
+
+    for _, ca in ipairs(cas) do
+      local x509, err = openssl_x509.new(ca.cert, "PEM")
+      if err then
+        return nil, err
+      end
+
+      local _, err = trust_store:add(x509)
+      if err then
+        return nil, err
+      end
+    end
+
+    return trust_store
+  end,
+}
+
+
 local function init()
   default_cert_and_key = parse_key_and_cert {
     cert = assert(pl_utils.readfile(singletons.configuration.ssl_cert)),
@@ -156,7 +180,7 @@ end
 
 
 local function get_certificate(pk, sni_name)
-  return kong.cache:get("certificates:" .. pk.id,
+  return kong.core_cache:get("certificates:" .. pk.id,
                         get_certificate_opts, fetch_certificate,
                         pk, sni_name)
 end
@@ -170,7 +194,7 @@ local function find_certificate(sni)
 
   local sni_wild_pref, sni_wild_suf = produce_wild_snis(sni)
 
-  local bulk = mlcache.new_bulk(3)
+  local bulk = mlcache.new_bulk(4)
 
   bulk:add("snis:" .. sni, nil, fetch_sni, sni)
 
@@ -182,12 +206,14 @@ local function find_certificate(sni)
     bulk:add("snis:" .. sni_wild_suf, nil, fetch_sni, sni_wild_suf)
   end
 
-  local res, err = kong.cache:get_bulk(bulk)
+  bulk:add("snis:" .. DEFAULT_SNI, nil, fetch_sni, DEFAULT_SNI)
+
+  local res, err = kong.core_cache:get_bulk(bulk)
   if err then
     return nil, err
   end
 
-  for i, sni, err in mlcache.each_bulk_res(res) do
+  for _, sni, err in mlcache.each_bulk_res(res) do
     if err then
       log(ERR, "failed to fetch SNI: ", err)
 
@@ -201,7 +227,7 @@ end
 
 
 local function execute()
-  local sn, err = ngx_ssl.server_name()
+  local sn, err = server_name()
   if err then
     log(ERR, "could not retrieve SNI: ", err)
     return ngx.exit(ngx.ERROR)
@@ -220,23 +246,59 @@ local function execute()
 
   -- set the certificate for this connection
 
-  local ok, err = ngx_ssl.clear_certs()
+  local ok, err = clear_certs()
   if not ok then
     log(ERR, "could not clear existing (default) certificates: ", err)
     return ngx.exit(ngx.ERROR)
   end
 
-  ok, err = ngx_ssl.set_cert(cert_and_key.cert)
+  ok, err = set_cert(cert_and_key.cert)
   if not ok then
     log(ERR, "could not set configured certificate: ", err)
     return ngx.exit(ngx.ERROR)
   end
 
-  ok, err = ngx_ssl.set_priv_key(cert_and_key.key)
+  ok, err = set_priv_key(cert_and_key.key)
   if not ok then
     log(ERR, "could not set configured private key: ", err)
     return ngx.exit(ngx.ERROR)
   end
+end
+
+
+local function ca_ids_cache_key(ca_ids)
+  tb_sort(ca_ids)
+  return "ca_stores:" .. ngx_md5(tb_concat(ca_ids, ':'))
+end
+
+
+local function fetch_ca_certificates(ca_ids)
+  local cas = new_tab(#ca_ids, 0)
+  local key = new_tab(1, 0)
+
+  for i, ca_id in ipairs(ca_ids) do
+    key.id = ca_id
+
+    local obj, err = kong.db.ca_certificates:select(key)
+    if not obj then
+      if err then
+        return nil, err
+      end
+
+      return nil, "CA Certificate '" .. tostring(ca_id) .. "' does not exist"
+    end
+
+    cas[i] = obj
+  end
+
+  return cas
+end
+
+
+local function get_ca_certificate_store(ca_ids)
+  return kong.core_cache:get(ca_ids_cache_key(ca_ids),
+                         get_ca_store_opts, fetch_ca_certificates,
+                         ca_ids)
 end
 
 
@@ -246,4 +308,5 @@ return {
   produce_wild_snis = produce_wild_snis,
   execute = execute,
   get_certificate = get_certificate,
+  get_ca_certificate_store = get_ca_certificate_store,
 }

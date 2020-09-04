@@ -1,14 +1,14 @@
 local typedefs = require "kong.db.schema.typedefs"
-local openssl_pkey = require "openssl.pkey"
-
+local openssl_pkey = require "resty.openssl.pkey"
 
 local function validate_ssl_key(key)
-  if not pcall(openssl_pkey.new, key) then
+  local _, err =  openssl_pkey.new(key)
+  if err then
     return nil, "invalid key"
   end
+
   return true
 end
-
 
 return {
   jwt_secrets = {
@@ -16,6 +16,7 @@ return {
     primary_key = { "id" },
     cache_key = { "key" },
     endpoint_key = "key",
+    workspaceable = true,
     admin_api_name = "jwts",
     admin_api_nested_name = "jwt",
     fields = {

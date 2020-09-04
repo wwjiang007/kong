@@ -12,6 +12,7 @@ for _, strategy in helpers.each_strategy() do
     local bp
     lazy_setup(function()
       local db = assert(DB.new(helpers.test_conf, strategy))
+      kong.db = db
       assert(db:init_connector())
       assert(db.plugins:load_plugin_schemas(helpers.test_conf.loaded_plugins))
       assert(db:truncate())
@@ -84,14 +85,6 @@ for _, strategy in helpers.each_strategy() do
   end)
 
   describe(string.format("blueprints for #%s", strategy), function()
-    pending("inserts apis", function()
-      -- TODO: remove this test when APIs are removed
-      local a = bp.apis:insert({ hosts = { "localhost" } })
-      assert.matches(UUID_PATTERN, a.id)
-      assert.equal("number", type(a.created_at))
-      assert.equal(helpers.mock_upstream_url, a.upstream_url)
-    end)
-
     it("inserts oauth2 plugins", function()
       local s = bp.services:insert()
       local p = bp.oauth2_plugins:insert({ service = { id = s.id } })
@@ -135,9 +128,9 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     it("inserts acl plugins", function()
-      local p = bp.acl_plugins:insert({ config = { whitelist = {"admin"} } })
+      local p = bp.acl_plugins:insert({ config = { allow = {"admin"} } })
       assert.equals("acl", p.name)
-      assert.same({"admin"}, p.config.whitelist)
+      assert.same({"admin"}, p.config.allow)
       assert.matches(UUID_PATTERN, p.id)
     end)
 

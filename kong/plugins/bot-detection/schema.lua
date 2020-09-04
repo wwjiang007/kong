@@ -4,21 +4,30 @@ return {
   name = "bot-detection",
   fields = {
     { consumer = typedefs.no_consumer },
-    { run_on = typedefs.run_on_first },
     { protocols = typedefs.protocols_http },
     { config = {
         type = "record",
         fields = {
-          { whitelist = {
+          { allow = {
               type = "array",
               elements = { type = "string", is_regex = true },
               default = {},
           }, },
-          { blacklist = {
+          { deny = {
               type = "array",
               elements = { type = "string", is_regex = true },
               default = {},
           }, },
-    }, }, },
+        },
+        shorthands = {
+          -- deprecated forms, to be removed in Kong 3.0
+          { blacklist = function(value)
+              return { deny = value }
+            end },
+          { whitelist = function(value)
+              return { allow = value }
+            end },
+        },
+    }, },
   },
 }

@@ -82,6 +82,7 @@ describe("reports", function()
       package.loaded["kong.reports"] = nil
       reports = require "kong.reports"
       reports.toggle(true)
+      reports._create_counter()
     end)
 
     describe("sends 'database'", function()
@@ -122,6 +123,76 @@ describe("reports", function()
 
         local _, res = assert(thread:join())
         assert.matches("database=off", res, nil, true)
+      end)
+    end)
+
+    describe("sends 'role'", function()
+      it("traditional", function()
+        local conf = assert(conf_loader(nil))
+        reports.configure_ping(conf)
+
+        local thread = helpers.tcp_server(8189)
+        reports.send_ping("127.0.0.1", 8189)
+
+        local _, res = assert(thread:join())
+        assert._matches("role=traditional", res, nil, true)
+      end)
+
+      it("control_plane", function()
+        local conf = assert(conf_loader(nil, {
+          role = "control_plane",
+          cluster_cert = "spec/fixtures/kong_spec.crt",
+          cluster_cert_key = "spec/fixtures/kong_spec.key",
+        }))
+        reports.configure_ping(conf)
+
+        local thread = helpers.tcp_server(8189)
+        reports.send_ping("127.0.0.1", 8189)
+
+        local _, res = assert(thread:join())
+        assert.matches("role=control_plane", res, nil, true)
+      end)
+
+      it("data_plane", function()
+        local conf = assert(conf_loader(nil, {
+          role = "data_plane",
+          database = "off",
+          cluster_cert = "spec/fixtures/kong_spec.crt",
+          cluster_cert_key = "spec/fixtures/kong_spec.key",
+        }))
+        reports.configure_ping(conf)
+
+        local thread = helpers.tcp_server(8189)
+        reports.send_ping("127.0.0.1", 8189)
+
+        local _, res = assert(thread:join())
+        assert.matches("role=data_plane", res, nil, true)
+      end)
+    end)
+
+    describe("sends 'kic'", function()
+      it("default (off)", function()
+        local conf = assert(conf_loader(nil))
+        reports.configure_ping(conf)
+
+        local thread = helpers.tcp_server(8189)
+        reports.send_ping("127.0.0.1", 8189)
+
+        local _, res = assert(thread:join())
+        assert._matches("kic=false", res, nil, true)
+      end)
+
+      it("enabled", function()
+        local conf = assert(conf_loader(nil, {
+          kic = "on",
+        }))
+        reports.configure_ping(conf)
+
+        local thread = helpers.tcp_server(8189)
+        reports.send_ping("127.0.0.1", 8189)
+
+        local _, res = assert(thread:join())
+        assert.matches("kic=true", res, nil, true)
       end)
     end)
 
@@ -209,75 +280,6 @@ describe("reports", function()
       end)
     end)
 
-    describe("sends '_orig' for 'origins'", function()
-      it("off", function()
-        local conf = assert(conf_loader(nil, {
-          origins = ""
-        }))
-        reports.configure_ping(conf)
-
-        local thread = helpers.tcp_server(8189)
-        reports.send_ping("127.0.0.1", 8189)
-
-        local _, res = assert(thread:join())
-        assert.matches("_orig=0", res, nil, true)
-      end)
-
-      it("on", function()
-        local conf = assert(conf_loader(nil, {
-          origins = "http://localhost:8000=http://localhost:9000",
-        }))
-        reports.configure_ping(conf)
-
-        local thread = helpers.tcp_server(8189)
-        reports.send_ping("127.0.0.1", 8189)
-
-        local _, res = assert(thread:join())
-        assert.matches("_orig=1", res, nil, true)
-      end)
-    end)
-
-    describe("sends '_tip' for 'transparent'", function()
-      it("not specified", function()
-        local conf = assert(conf_loader(nil, {
-          stream_listen = "127.0.0.1:9000",
-        }))
-        reports.configure_ping(conf)
-
-        local thread = helpers.tcp_server(8189)
-        reports.send_ping("127.0.0.1", 8189)
-
-        local _, res = assert(thread:join())
-        assert.matches("_tip=0", res, nil, true)
-      end)
-
-      it("specified in 'stream_listen'", function()
-        local conf = assert(conf_loader(nil, {
-          stream_listen = "127.0.0.1:8000 transparent",
-        }))
-        reports.configure_ping(conf)
-
-        local thread = helpers.tcp_server(8189)
-        reports.send_ping("127.0.0.1", 8189)
-
-        local _, res = assert(thread:join())
-        assert.matches("_tip=1", res, nil, true)
-      end)
-
-      it("specified in 'proxy_listen'", function()
-        local conf = assert(conf_loader(nil, {
-          proxy_listen = "127.0.0.1:8000 transparent",
-        }))
-        reports.configure_ping(conf)
-
-        local thread = helpers.tcp_server(8189)
-        reports.send_ping("127.0.0.1", 8189)
-
-        local _, res = assert(thread:join())
-        assert.matches("_tip=1", res, nil, true)
-      end)
-    end)
-
     it("default configuration ping contents", function()
         local conf = assert(conf_loader())
         reports.configure_ping(conf)
@@ -290,8 +292,6 @@ describe("reports", function()
         assert.matches("_admin=1", res, nil, true)
         assert.matches("_proxy=1", res, nil, true)
         assert.matches("_stream=0", res, nil, true)
-        assert.matches("_orig=0", res, nil, true)
-        assert.matches("_tip=0", res, nil, true)
     end)
   end)
 
@@ -301,13 +301,14 @@ describe("reports", function()
     end)
 
     lazy_teardown(function()
-      ngx.log:revert()
+      ngx.log:revert() -- luacheck: ignore
     end)
 
     before_each(function()
       package.loaded["kong.reports"] = nil
       reports = require "kong.reports"
       reports.toggle(true)
+      reports._create_counter()
     end)
 
     it("does not query Redis if not enabled", function()

@@ -5,6 +5,7 @@ return {
   name         = "routes",
   primary_key  = { "id" },
   endpoint_key = "name",
+  workspaceable = true,
   subschema_key = "protocols",
 
   fields = {
@@ -33,6 +34,7 @@ return {
                                    }, },
     { regex_priority = { type = "integer", default = 0 }, },
     { strip_path     = { type = "boolean", default = true }, },
+    { path_handling  = { type = "string", default = "v0", one_of = { "v0", "v1" }, }, },
     { preserve_host  = { type = "boolean", default = false }, },
     { snis = { type = "set",
                elements = typedefs.sni }, },

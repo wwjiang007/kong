@@ -1,5 +1,4 @@
 local singletons = require "kong.singletons"
-local constants = require "kong.constants"
 local balancer = require "kong.runloop.balancer"
 local utils = require "kong.tools.utils"
 local cjson = require "cjson"
@@ -9,6 +8,7 @@ local setmetatable = setmetatable
 local tostring = tostring
 local ipairs = ipairs
 local table = table
+local type = type
 local min = math.min
 
 
@@ -65,10 +65,11 @@ local function clean_history(self, upstream_pk)
     ngx.log(ngx.NOTICE, "[Target DAO] Starting cleanup of target table for upstream ",
                tostring(upstream_pk.id))
     local cnt = 0
-    for _, entry in ipairs(delete) do
+    -- reverse again; so deleting oldest entries first
+    for i = #delete, 1, -1 do
+      local entry = delete[i]
+
       -- notice super - this is real delete (not creating a new entity with weight = 0)
-      -- not sending update events, one event at the end, based on the
-      -- post of the new entry should suffice to reload only once
       self.super.delete(self, { id = entry.id })
       -- ignoring errors here, deleted by id, so should not matter
       -- in case another kong-node does the same cleanup simultaneously
@@ -91,7 +92,7 @@ local function format_target(target)
 end
 
 
-function _TARGETS:insert(entity)
+function _TARGETS:insert(entity, options)
   if entity.target then
     local formatted_target, err = format_target(entity.target)
     if not formatted_target then
@@ -101,12 +102,24 @@ function _TARGETS:insert(entity)
     entity.target = formatted_target
   end
 
-  local row, err, err_t = self.super.insert(self, entity)
-  if row then
-    clean_history(self, entity.upstream)
-  end
+  -- cleaning up will NOT send invalidation events, hence we only add the new
+  -- entry AFTER the cleanup, such that the cleanup will be picked up by the
+  -- other nodes based on the event of the newly added entry
+  clean_history(self, entity.upstream)
 
-  return row, err, err_t
+  return self.super.insert(self, entity, options)
+end
+
+
+function _TARGETS:upsert(pk, entity, options)
+  entity.id = pk.id
+  return self:insert(entity, options)
+end
+
+
+function _TARGETS:upsert_by_target(unique_key, entity, options)
+  entity.target = unique_key
+  return self:insert(entity, options)
 end
 
 
@@ -124,8 +137,8 @@ function _TARGETS:delete(pk)
 end
 
 
-function _TARGETS:select(pk)
-  local target, err, err_t = self.super.select(self, pk)
+function _TARGETS:select(pk, options)
+  local target, err, err_t = self.super.select(self, pk, options)
   if err then
     return nil, err, err_t
   end
@@ -142,7 +155,7 @@ function _TARGETS:select(pk)
 end
 
 
-function _TARGETS:delete_by_target(tgt)
+function _TARGETS:delete_by_target(tgt, options)
   local target, err, err_t = self:select_by_target(tgt)
   if err then
     return nil, err, err_t
@@ -152,7 +165,7 @@ function _TARGETS:delete_by_target(tgt)
     target   = target.target,
     upstream = target.upstream,
     weight   = 0,
-  })
+  }, options)
 end
 
 
@@ -244,10 +257,21 @@ function _TARGETS:page_for_upstream(upstream_pk, size, offset, options)
     end
   end
 
+  local pagination = self.pagination
+
+  if type(options) == "table" and type(options.pagination) == "table" then
+    pagination = utils.table_merge(pagination, options.pagination)
+  end
+
+  if not size then
+    size = pagination.page_size
+  end
+
+  size = min(size, pagination.max_page_size)
+  offset = offset or 0
+
   -- Extract the requested page
   local page = setmetatable({}, cjson.array_mt)
-  size = min(size or constants.DEFAULT_PAGE_SIZE, constants.MAX_PAGE_SIZE)
-  offset = offset or 0
   for i = 1 + offset, size + offset do
     local target = all_active_targets[i]
     if not target then
@@ -280,34 +304,37 @@ function _TARGETS:page_for_upstream_with_health(upstream_pk, ...)
     ngx.log(ngx.ERR, "failed getting upstream health: ", err)
   end
 
-  for _, target in ipairs(targets) do
-    -- In case of DNS errors when registering a target,
-    -- that error happens inside lua-resty-dns-client
-    -- and the end-result is that it just doesn't launch the callback,
-    -- which means kong.runloop.balancer and healthchecks don't get
-    -- notified about the target at all. We extrapolate the DNS error
-    -- out of the fact that the target is missing from the balancer.
-    -- Note that lua-resty-dns-client does retry by itself,
-    -- meaning that if DNS is down and it eventually resumes working, the
-    -- library will issue the callback and the target will change state.
-    if health_info[target.target] ~= nil and
-      #health_info[target.target].addresses > 0 then
-      target.health = "HEALTHCHECKS_OFF"
-      -- If any of the target addresses are healthy, then the target is
-      -- considered healthy.
-      for _, address in ipairs(health_info[target.target].addresses) do
-        if address.health == "HEALTHY" then
-          target.health = "HEALTHY"
-          break
-        elseif address.health == "UNHEALTHY" then
-          target.health = "UNHEALTHY"
-        end
+  if health_info then
+    for _, target in ipairs(targets) do
+      -- In case of DNS errors when registering a target,
+      -- that error happens inside lua-resty-dns-client
+      -- and the end-result is that it just doesn't launch the callback,
+      -- which means kong.runloop.balancer and healthchecks don't get
+      -- notified about the target at all. We extrapolate the DNS error
+      -- out of the fact that the target is missing from the balancer.
+      -- Note that lua-resty-dns-client does retry by itself,
+      -- meaning that if DNS is down and it eventually resumes working, the
+      -- library will issue the callback and the target will change state.
+      if health_info[target.target] ~= nil and
+        #health_info[target.target].addresses > 0 then
+        target.health = "HEALTHCHECKS_OFF"
+        -- If any of the target addresses are healthy, then the target is
+        -- considered healthy.
+        for _, address in ipairs(health_info[target.target].addresses) do
+          if address.health == "HEALTHY" then
+            target.health = "HEALTHY"
+            break
+          elseif address.health == "UNHEALTHY" then
+            target.health = "UNHEALTHY"
+          end
 
+        end
+      else
+        target.health = "DNS_ERROR"
       end
-    else
-      target.health = "DNS_ERROR"
+      target.data = health_info[target.target]
     end
-    target.data = health_info[target.target]
+
   end
 
   return targets, nil, nil, next_offset
@@ -320,7 +347,8 @@ function _TARGETS:select_by_upstream_filter(upstream_pk, filter, options)
     return nil, err, err_t
   end
 
-  for _, t in ipairs(targets) do
+  for i = #targets, 1, -1 do
+    local t = targets[i]
     if t.id == filter.id or t.target == filter.target then
       return t
     end
@@ -361,6 +389,16 @@ function _TARGETS:post_health(upstream_pk, target, address, is_healthy)
   singletons.cluster_events:broadcast("balancer:post_health", packet)
 
   return true
+end
+
+
+function _TARGETS:get_balancer_health(upstream_pk)
+  local health_info, err = balancer.get_balancer_health(upstream_pk.id)
+  if err then
+    ngx.log(ngx.ERR, "failed getting upstream health: ", err)
+  end
+
+  return health_info
 end
 
 

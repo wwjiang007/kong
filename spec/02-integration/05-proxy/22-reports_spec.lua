@@ -41,11 +41,8 @@ for _, strategy in helpers.each_strategy() do
     local reports_send_stream_ping = function()
       ngx.sleep(0.01) -- hand over the CPU so other threads can do work (processing the sent data)
 
-      local tcp = require "socket".tcp()
+      local tcp = ngx.socket.tcp()
       assert(tcp:connect(helpers.get_proxy_ip(false), 19001))
-
-      -- TODO: we need to get rid of the next line!
-      assert(tcp:send(MESSAGE))
 
       local body = assert(tcp:receive("*a"))
       assert.equal("ok", body)
@@ -58,19 +55,13 @@ for _, strategy in helpers.each_strategy() do
       local fd = assert(io.open(dns_hostsfile, "w"))
       assert(fd:write("127.0.0.1 " .. constants.REPORTS.ADDRESS))
       assert(fd:close())
-    end)
-
-    lazy_teardown(function()
-      os.remove(dns_hostsfile)
-    end)
-
-    before_each(function()
-      reports_server = helpers.mock_reports_server()
 
       local bp = assert(helpers.get_db_utils(strategy, {
         "services",
         "routes",
         "plugins",
+        "certificates",
+        "snis",
       }, { "reports-api" }))
 
       local http_srv = assert(bp.services:insert {
@@ -187,16 +178,23 @@ for _, strategy in helpers.each_strategy() do
         plugins = "reports-api",
         stream_listen = helpers.get_proxy_ip(false) .. ":19000," ..
                         helpers.get_proxy_ip(false) .. ":19001," ..
-                        helpers.get_proxy_ip(true)  .. ":19443",
-        service_mesh = "on",
+                        helpers.get_proxy_ip(true)  .. ":19443 ssl",
 
       }))
+    end)
 
+    lazy_teardown(function()
+      helpers.stop_kong()
+
+      os.remove(dns_hostsfile)
+    end)
+
+    before_each(function()
+      reports_server = helpers.mock_reports_server()
     end)
 
     after_each(function()
-      helpers.stop_kong()
-      reports_server:stop() -- stop the reports server if it was not already stopped
+      reports_server:stop()
     end)
 
     it("reports http requests", function()
@@ -322,12 +320,12 @@ for _, strategy in helpers.each_strategy() do
 
     it("reports grpcs requests", function()
       local grpcs_client = assert(helpers.proxy_client_grpcs())
-      assert(grpcs_client({
+      grpcs_client({
         service = "hello.HelloService.SayHello",
         opts = {
           ["-authority"] = "grpcs",
         },
-      }))
+      })
 
       reports_send_ping()
 
@@ -383,10 +381,9 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     it("#stream reports tcp streams", function()
-      local tcp = require "socket".tcp()
+      local tcp = ngx.socket.tcp()
       assert(tcp:connect(helpers.get_proxy_ip(false), 19000))
 
-      -- TODO: we need to get rid of the next line!
       assert(tcp:send(MESSAGE))
 
       local body = assert(tcp:receive("*a"))
@@ -404,23 +401,12 @@ for _, strategy in helpers.each_strategy() do
     end)
 
     it("#stream reports tls streams", function()
-      local tcp = require "socket".tcp()
-      local ssl = require("ssl")
+      local tcp = ngx.socket.tcp()
 
       assert(tcp:connect(helpers.get_proxy_ip(true), 19443))
 
-      tcp = ssl.wrap(tcp, {
-        mode     = "client",
-        verify   = "none",
-        protocol = "any",
-      })
+      assert(tcp:sslhandshake(nil, "this-is-needed.test", false))
 
-      -- TODO: should SNI really be mandatory?
-      tcp:sni("this-is-needed.test")
-
-      assert(tcp:dohandshake())
-
-      -- TODO: we need to get rid of the next line!
       assert(tcp:send(MESSAGE))
 
       local body = assert(tcp:receive("*a"))
@@ -432,9 +418,25 @@ for _, strategy in helpers.each_strategy() do
 
       local _, reports_data = assert(reports_server:stop())
       assert.same(1, #reports_data)
-      assert.match("streams=1", reports_data[1])
-      assert.match("tcp_streams=0", reports_data[1])
+      assert.match("streams=2", reports_data[1])
+      assert.match("tcp_streams=1", reports_data[1]) -- it counts the stream request for the ping
       assert.match("tls_streams=1", reports_data[1])
+    end)
+
+    it("does not log NGINX-produced errors", function()
+      local proxy_client = assert(helpers.proxy_client())
+      local res = assert(proxy_client:send {
+        method = "GET",
+        path = "/",
+        headers = {
+          ["X-Large"] = string.rep("a", 2^10 * 10), -- default large_client_header_buffers is 8k
+        }
+      })
+      assert.res_status(494, res)
+      proxy_client:close()
+
+      assert.errlog()
+            .has.no.line([[could not determine log suffix]], true)
     end)
   end)
 end

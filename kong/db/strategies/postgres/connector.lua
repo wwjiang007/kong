@@ -1,8 +1,10 @@
 local logger       = require "kong.cmd.utils.log"
+local utils        = require "kong.tools.utils"
 local pgmoon       = require "pgmoon"
 local arrays       = require "pgmoon.arrays"
 local stringx      = require "pl.stringx"
 local semaphore    = require "ngx.semaphore"
+local kong_global = require "kong.global"
 
 
 local setmetatable = setmetatable
@@ -25,6 +27,7 @@ local log          = ngx.log
 local match        = string.match
 local fmt          = string.format
 local sub          = string.sub
+local kong         = kong
 
 
 local WARN                          = ngx.WARN
@@ -39,6 +42,12 @@ local PROTECTED_TABLES = {
   schema_meta       = true,
   locks             = true,
 }
+local OPERATIONS = {
+  read  = true,
+  write = true,
+}
+local ADMIN_API_PHASE = kong_global.phases.admin_api
+local kong_get_phase = kong_global.get_phase
 
 
 local function now_updated()
@@ -179,11 +188,8 @@ local setkeepalive
 
 
 local function connect(config)
-  local phase  = get_phase()
-  -- TODO: remove preread from here when the issue with starttls has been fixed
-  -- TODO: make also sure that Cassandra doesn't use LuaSockets on preread after
-  --       starttls has been fixed
-  if phase == "preread" or phase == "init" or phase == "init_worker" or ngx.IS_CLI then
+  local phase  = get_phase(kong)
+  if phase == "init" or phase == "init_worker" or ngx.IS_CLI then
     -- Force LuaSocket usage in the CLI in order to allow for self-signed
     -- certificates to be trusted (via opts.cafile) in the resty-cli
     -- interpreter (no way to set lua_ssl_trusted_certificate).
@@ -261,8 +267,8 @@ local _mt = {
 _mt.__index = _mt
 
 
-function _mt:get_stored_connection()
-  local conn = self.super.get_stored_connection(self)
+function _mt:get_stored_connection(operation)
+  local conn = self.super.get_stored_connection(self, operation)
   if conn and conn.sock then
     return conn
   end
@@ -370,49 +376,59 @@ function _mt:infos()
   end
 
   return {
-    strategy  = "PostgreSQL",
-    db_name   = self.config.database,
-    db_schema = self.config.schema,
-    db_desc   = "database",
-    db_ver    = db_ver or "unknown",
+    strategy    = "PostgreSQL",
+    db_name     = self.config.database,
+    db_schema   = self.config.schema,
+    db_desc     = "database",
+    db_ver      = db_ver or "unknown",
+    db_readonly = self.config_ro ~= nil,
   }
 end
 
 
-function _mt:connect()
-  local conn = self:get_stored_connection()
+function _mt:connect(operation)
+  if operation ~= nil and operation ~= "read" and operation ~= "write" then
+    error("operation must be 'read' or 'write', was: " .. tostring(operation), 2)
+  end
+
+  if not operation or not self.config_ro then
+    operation = "write"
+  end
+
+  local conn = self:get_stored_connection(operation)
   if conn then
     return conn
   end
 
-  local connection, err = connect(self.config)
+  local connection, err = connect(operation == "write" and
+                                  self.config or self.config_ro)
   if not connection then
     return nil, err
   end
 
-  self:store_connection(connection)
+  self:store_connection(connection, operation)
 
   return connection
 end
 
 
 function _mt:connect_migrations()
-  return self:connect()
+  return self:connect("write")
 end
 
 
 function _mt:close()
-  local conn = self:get_stored_connection()
-  if not conn then
-    return true
-  end
+  for operation in pairs(OPERATIONS) do
+    local conn = self:get_stored_connection(operation)
+    if conn then
+      local _, err = conn:disconnect()
 
-  local _, err = conn:disconnect()
+      self:store_connection(nil, operation)
 
-  self:store_connection(nil)
-
-  if err then
-    return nil, err
+      if err then
+        return nil, err
+      end
+    end
   end
 
   return true
@@ -420,25 +436,26 @@ end
 
 
 function _mt:setkeepalive()
-  local conn = self:get_stored_connection()
-  if not conn then
-    return true
-  end
+  for operation in pairs(OPERATIONS) do
+    local conn = self:get_stored_connection(operation)
+    if conn then
+      local _, err = setkeepalive(conn)
 
-  local _, err = setkeepalive(conn)
+      self:store_connection(nil, operation)
 
-  self:store_connection(nil)
-
-  if err then
-    return nil, err
+      if err then
+        return nil, err
+      end
+    end
   end
 
   return true
 end
 
 
-function _mt:acquire_query_semaphore_resource()
-  if not self.sem then
+function _mt:acquire_query_semaphore_resource(operation)
+  local sem = self["sem_" .. operation]
+  if not sem then
     return true
   end
 
@@ -449,7 +466,7 @@ function _mt:acquire_query_semaphore_resource()
     end
   end
 
-  local ok, err = self.sem:wait(self.config.sem_timeout)
+  local ok, err = sem:wait(self.config.sem_timeout)
   if not ok then
     return nil, err
   end
@@ -458,8 +475,9 @@ function _mt:acquire_query_semaphore_resource()
 end
 
 
-function _mt:release_query_semaphore_resource()
-  if not self.sem then
+function _mt:release_query_semaphore_resource(operation)
+  local sem = self["sem_" .. operation]
+  if not sem then
     return true
   end
 
@@ -470,28 +488,45 @@ function _mt:release_query_semaphore_resource()
     end
   end
 
-  self.sem:post()
+  sem:post()
 end
 
 
-function _mt:query(sql)
+function _mt:query(sql, operation)
+  if operation ~= nil and operation ~= "read" and operation ~= "write" then
+    error("operation must be 'read' or 'write', was: " .. tostring(operation), 2)
+  end
+
+  local phase  = get_phase(kong)
+
+  if not operation or
+     not self.config_ro or
+     (phase == "content" and kong_get_phase(kong) == ADMIN_API_PHASE)
+  then
+    -- admin API requests skips the replica optimization
+    -- to ensure all its results are always strongly consistent
+    operation = "write"
+  end
+
   local res, err, partial, num_queries
 
   local ok
-  ok, err = self:acquire_query_semaphore_resource()
+  ok, err = self:acquire_query_semaphore_resource(operation)
   if not ok then
     return nil, "error acquiring query semaphore: " .. err
   end
 
-  local conn = self:get_stored_connection()
+  local conn = self:get_stored_connection(operation)
   if conn then
     res, err, partial, num_queries = conn:query(sql)
 
   else
     local connection
-    connection, err = connect(self.config)
+    local config = operation == "write" and self.config or self.config_ro
+
+    connection, err = connect(config)
     if not connection then
-      self:release_query_semaphore_resource()
+      self:release_query_semaphore_resource(operation)
       return nil, err
     end
 
@@ -500,7 +535,7 @@ function _mt:query(sql)
     setkeepalive(connection)
   end
 
-  self:release_query_semaphore_resource()
+  self:release_query_semaphore_resource(operation)
 
   if res then
     return res, nil, partial, num_queries or err
@@ -511,7 +546,7 @@ end
 
 
 function _mt:iterate(sql)
-  local res, err, partial, num_queries = self:query(sql)
+  local res, err, partial, num_queries = self:query(sql, "read")
   if not res then
     local failed = false
     return function()
@@ -876,202 +911,6 @@ function _mt:record_migration(subsystem, name, state)
 end
 
 
-function _mt:are_014_apis_present()
-  local _, err = self:query([[
-    DO $$
-    BEGIN
-      IF EXISTS(SELECT id FROM apis) THEN
-        RAISE EXCEPTION 'there are apis in the db';
-      END IF;
-    EXCEPTION WHEN UNDEFINED_TABLE THEN
-      -- Do nothing, table does not exist
-    END;
-    $$;
-  ]])
-  if err and err:match("there are apis in the db") then
-    return true
-  end
-  if err then
-    return nil, err
-  end
-  return false
-end
-
-
-function _mt:is_014()
-  local res = {}
-
-  local needed_migrations = {
-    ["core"] = {
-      "2015-01-12-175310_skeleton",
-      "2015-01-12-175310_init_schema",
-      "2015-11-23-817313_nodes",
-      "2016-02-29-142793_ttls",
-      "2016-09-05-212515_retries",
-      "2016-09-16-141423_upstreams",
-      "2016-12-14-172100_move_ssl_certs_to_core",
-      "2016-11-11-151900_new_apis_router_1",
-      "2016-11-11-151900_new_apis_router_2",
-      "2016-11-11-151900_new_apis_router_3",
-      "2016-01-25-103600_unique_custom_id",
-      "2017-01-24-132600_upstream_timeouts",
-      "2017-01-24-132600_upstream_timeouts_2",
-      "2017-03-27-132300_anonymous",
-      "2017-04-18-153000_unique_plugins_id",
-      "2017-04-18-153000_unique_plugins_id_2",
-      "2017-05-19-180200_cluster_events",
-      "2017-05-19-173100_remove_nodes_table",
-      "2017-06-16-283123_ttl_indexes",
-      "2017-07-28-225000_balancer_orderlist_remove",
-      "2017-10-02-173400_apis_created_at_ms_precision",
-      "2017-11-07-192000_upstream_healthchecks",
-      "2017-10-27-134100_consistent_hashing_1",
-      "2017-11-07-192100_upstream_healthchecks_2",
-      "2017-10-27-134100_consistent_hashing_2",
-      "2017-09-14-121200_routes_and_services",
-      "2017-10-25-180700_plugins_routes_and_services",
-      "2018-03-27-123400_prepare_certs_and_snis",
-      "2018-03-27-125400_fill_in_snis_ids",
-      "2018-03-27-130400_make_ids_primary_keys_in_snis",
-      "2018-05-17-173100_hash_on_cookie",
-    },
-    ["response-transformer"] = {
-      "2016-05-04-160000_resp_trans_schema_changes",
-    },
-    ["jwt"] = {
-      "2015-06-09-jwt-auth",
-      "2016-03-07-jwt-alg",
-      "2017-05-22-jwt_secret_not_unique",
-      "2017-07-31-120200_jwt-auth_preflight_default",
-      "2017-10-25-211200_jwt_cookie_names_default",
-      "2018-03-15-150000_jwt_maximum_expiration",
-    },
-    ["ip-restriction"] = {
-      "2016-05-24-remove-cache",
-    },
-    ["statsd"] = {
-      "2017-06-09-160000_statsd_schema_changes",
-    },
-    ["cors"] = {
-      "2017-03-14_multiple_orgins",
-    },
-    ["basic-auth"] = {
-      "2015-08-03-132400_init_basicauth",
-      "2017-01-25-180400_unique_username",
-    },
-    ["key-auth"] = {
-      "2015-07-31-172400_init_keyauth",
-      "2017-07-31-120200_key-auth_preflight_default",
-    },
-    ["ldap-auth"] = {
-      "2017-10-23-150900_header_type_default",
-    },
-    ["hmac-auth"] = {
-      "2015-09-16-132400_init_hmacauth",
-      "2017-06-21-132400_init_hmacauth",
-    },
-    ["datadog"] = {
-      "2017-06-09-160000_datadog_schema_changes",
-    },
-    ["tcp-log"] = {
-      "2017-12-13-120000_tcp-log_tls",
-    },
-    ["acl"] = {
-      "2015-08-25-841841_init_acl",
-    },
-    ["response-ratelimiting"] = {
-      "2015-08-03-132400_init_response_ratelimiting",
-      "2016-08-04-321512_response-rate-limiting_policies",
-      "2017-12-19-120000_add_route_and_service_id_to_response_ratelimiting",
-    },
-    ["request-transformer"] = {
-      "2016-05-04-160000_req_trans_schema_changes",
-    },
-    ["rate-limiting"] = {
-      "2015-08-03-132400_init_ratelimiting",
-      "2016-07-25-471385_ratelimiting_policies",
-      "2017-11-30-120000_add_route_and_service_id",
-    },
-    ["oauth2"] = {
-      "2015-08-03-132400_init_oauth2",
-      "2016-07-15-oauth2_code_credential_id",
-      "2016-12-22-283949_serialize_redirect_uri",
-      "2016-09-19-oauth2_api_id",
-      "2016-12-15-set_global_credentials",
-      "2017-04-24-oauth2_client_secret_not_unique",
-      "2017-10-19-set_auth_header_name_default",
-      "2017-10-11-oauth2_new_refresh_token_ttl_config_value",
-      "2018-01-09-oauth2_pg_add_service_id",
-    },
-  }
-
-  local rows, err = self:query([[
-    SELECT to_regclass('schema_migrations') AS "name";
-  ]])
-  if err then
-    return nil, err
-  end
-
-  if not rows or not rows[1] or rows[1].name ~= "schema_migrations" then
-    -- no trace of legacy migrations: above 0.14
-    return res
-  end
-
-  local schema_migrations_rows, err = self:query([[
-    SELECT "id", "migrations" FROM "schema_migrations";
-  ]])
-  if err then
-    return nil, err
-  end
-
-  if not schema_migrations_rows then
-    -- empty legacy migrations: invalid state
-    res.invalid_state = true
-    return res
-  end
-
-  local schema_migrations = {}
-  for i = 1, #schema_migrations_rows do
-    local row = schema_migrations_rows[i]
-    schema_migrations[row.id] = row.migrations
-  end
-
-  for name, migrations in pairs(needed_migrations) do
-    local current_migrations = schema_migrations[name]
-    if not current_migrations then
-      -- missing all migrations for a component: below 0.14
-      res.invalid_state = true
-      res.missing_component = name
-      return res
-    end
-
-    for _, needed_migration in ipairs(migrations) do
-      local found
-
-      for _, current_migration in ipairs(current_migrations) do
-        if current_migration == needed_migration then
-          found = true
-          break
-        end
-      end
-
-      if not found then
-        -- missing at least one migration for a component: below 0.14
-        res.invalid_state = true
-        res.missing_component = name
-        res.missing_migration = needed_migration
-        return res
-      end
-    end
-  end
-
-  -- all migrations match: 0.14 install
-  res.is_014 = true
-
-  return res
-end
-
-
 local _M = {}
 
 
@@ -1103,12 +942,49 @@ function _M.new(kong_config)
     end
   end
 
-  return setmetatable({
+  local self = {
     config            = config,
     escape_identifier = db.escape_identifier,
     escape_literal    = db.escape_literal,
-    sem               = sem,
-  }, _mt)
+    sem_write         = sem,
+  }
+
+  if not ngx.IS_CLI and kong_config.pg_ro_host then
+    ngx.log(ngx.DEBUG, "PostgreSQL connector readonly connection enabled")
+
+    local ro_override = {
+      host        = kong_config.pg_ro_host,
+      port        = kong_config.pg_ro_port,
+      timeout     = kong_config.pg_ro_timeout,
+      user        = kong_config.pg_ro_user,
+      password    = kong_config.pg_ro_password,
+      database    = kong_config.pg_ro_database,
+      schema      = kong_config.pg_ro_schema,
+      ssl         = kong_config.pg_ro_ssl,
+      ssl_verify  = kong_config.pg_ro_ssl_verify,
+      cafile      = kong_config.lua_ssl_trusted_certificate,
+      sem_max     = kong_config.pg_ro_max_concurrent_queries,
+      sem_timeout = kong_config.pg_ro_semaphore_timeout and
+                    (kong_config.pg_ro_semaphore_timeout / 1000) or nil,
+    }
+
+    local config_ro = utils.table_merge(config, ro_override)
+
+    local sem
+    if config_ro.sem_max > 0 then
+      local err
+      sem, err = semaphore.new(config_ro.sem_max)
+      if not sem then
+        ngx.log(ngx.CRIT, "failed creating the PostgreSQL connector semaphore: ",
+                          err)
+      end
+    end
+
+    self.config_ro = config_ro
+    self.sem_read = sem
+  end
+
+  return setmetatable(self, _mt)
 end
 
 

@@ -1,5 +1,5 @@
 local cjson = require "cjson"
-local openssl_hmac = require "openssl.hmac"
+local openssl_hmac = require "resty.openssl.hmac"
 local helpers = require "spec.helpers"
 local utils = require "kong.tools.utils"
 local resty_sha256 = require "resty.sha256"
@@ -122,6 +122,19 @@ for _, strategy in helpers.each_strategy() do
           enforce_headers       = {"date", "request-line"},
           algorithms            = {"hmac-sha1", "hmac-sha256"},
           validate_request_body = true
+        }
+      }
+
+      local route7 = bp.routes:insert {
+        hosts = { "hmacauth7.com" },
+      }
+
+      bp.plugins:insert {
+        name     = "hmac-auth",
+        route = { id = route7.id },
+        config   = {
+          anonymous  = anonymous_user.username,
+          clock_skew = 3000
         }
       }
 
@@ -723,6 +736,7 @@ for _, strategy in helpers.each_strategy() do
         local parsed_body = cjson.decode(body)
         assert.equal(consumer.id, parsed_body.headers["x-consumer-id"])
         assert.equal(consumer.username, parsed_body.headers["x-consumer-username"])
+        assert.equal(credential.username, parsed_body.headers["x-credential-identifier"])
         assert.equal(credential.username, parsed_body.headers["x-credential-username"])
         assert.is_nil(parsed_body.headers["x-anonymous-consumer"])
       end)
@@ -909,6 +923,8 @@ for _, strategy in helpers.each_strategy() do
         body = cjson.decode(body)
         assert.equal(hmacAuth, body.headers["authorization"])
         assert.equal("bob", body.headers["x-consumer-username"])
+        assert.equal(credential.username, body.headers["x-credential-identifier"])
+        assert.equal(credential.username, body.headers["x-credential-username"])
         assert.is_nil(body.headers["x-anonymous-consumer"])
       end)
 
@@ -992,7 +1008,26 @@ for _, strategy in helpers.each_strategy() do
         body = cjson.decode(body)
         assert.equal("true", body.headers["x-anonymous-consumer"])
         assert.equal('no-body', body.headers["x-consumer-username"])
+        assert.equal(nil, body.headers["x-credential-identifier"])
+        assert.equal(nil, body.headers["x-credential-username"])
+
       end)
+
+      it("should pass with invalid credentials and username in anonymous", function()
+        local res = assert(proxy_client:send {
+          method  = "GET",
+          path    = "/request",
+          body    = {},
+          headers = {
+            ["HOST"] = "hmacauth7.com",
+          },
+        })
+        local body = assert.res_status(200, res)
+        body = cjson.decode(body)
+        assert.equal("true", body.headers["x-anonymous-consumer"])
+        assert.equal('no-body', body.headers["x-consumer-username"])
+      end)
+
       it("errors when anonymous user doesn't exist", function()
         finally(function()
           proxy_client = helpers.proxy_client()
