@@ -8,9 +8,11 @@ local phase_checker = require "kong.pdk.private.phases"
 
 
 local ngx = ngx
+local ngx_var = ngx.var
 local table_insert = table.insert
 local table_sort = table.sort
 local table_concat = table.concat
+local type = type
 local string_find = string.find
 local string_sub = string.sub
 local string_lower = string.lower
@@ -19,6 +21,7 @@ local normalize_multi_header = checks.normalize_multi_header
 local validate_header = checks.validate_header
 local validate_headers = checks.validate_headers
 local check_phase = phase_checker.check
+local escape = require("kong.tools.uri").escape
 
 
 local PHASES = phase_checker.phases
@@ -31,7 +34,7 @@ local preread_and_balancer = phase_checker.new(PHASES.preread, PHASES.balancer)
 ---
 -- Produce a lexicographically ordered querystring, given a table of values.
 --
--- @param args A table where keys are strings and values are strings, booleans,
+-- @tparam table args A table where keys are strings and values are strings, booleans,
 -- or an array of strings or booleans.
 -- @treturn string|nil an URL-encoded query string, or nil if an error ocurred
 -- @treturn string|nil and an error message if an error ocurred, or nil
@@ -90,7 +93,7 @@ local function new(self)
     end
 
 
-    self.ctx.core.buffered_proxying = true
+    ngx.ctx.buffered_proxying = true
   end
 
   ---
@@ -112,16 +115,21 @@ local function new(self)
       error("invalid scheme: " .. scheme, 2)
     end
 
-    ngx.var.upstream_scheme = scheme
+    ngx_var.upstream_scheme = scheme
   end
 
 
   ---
-  -- Sets the path component for the request to the service. It is not
-  -- normalized in any way and should **not** include the querystring.
+  -- Sets the path component for the request to the service.
+  --
+  -- The input accepts any valid *normalized* URI (including UTF-8 characters)
+  -- and this API will perform necessary escaping according to the RFC
+  -- to make the request valid.
+  --
+  -- Input should **not** include the querystring.
   -- @function kong.service.request.set_path
   -- @phases `access`
-  -- @param path The path string. Example: "/v2/movies"
+  -- @tparam string path The path string. Special characters and UTF-8 characters are allowed. Example: "/v2/movies" or "/foo/😀"
   -- @return Nothing; throws an error on invalid inputs.
   -- @usage
   -- kong.service.request.set_path("/v2/movies")
@@ -136,9 +144,7 @@ local function new(self)
       error("path must start with /", 2)
     end
 
-    -- TODO: is this necessary in specific phases?
-    -- ngx.req.set_uri(path)
-    ngx.var.upstream_uri = path
+    ngx_var.upstream_uri = escape(path)
   end
 
 
@@ -191,7 +197,7 @@ local function new(self)
     --
     -- @function kong.service.request.set_method
     -- @phases `rewrite`, `access`
-    -- @param method The method string, which should be given in all
+    -- @tparam string method The method string, which should be given in all
     -- uppercase. Supported values are: `"GET"`, `"HEAD"`, `"PUT"`, `"POST"`,
     -- `"DELETE"`, `"OPTIONS"`, `"MKCOL"`, `"COPY"`, `"MOVE"`, `"PROPFIND"`,
     -- `"PROPPATCH"`, `"LOCK"`, `"UNLOCK"`, `"PATCH"`, `"TRACE"`.
@@ -261,6 +267,11 @@ local function new(self)
   end
 
 
+  local set_authority
+  if ngx.config.subsystem ~= "stream" then
+    set_authority = require("resty.kong.grpc").set_authority
+  end
+
   ---
   -- Sets a header in the request to the Service with the given value. Any existing header
   -- with the same name will be overridden.
@@ -281,7 +292,18 @@ local function new(self)
     validate_header(header, value)
 
     if string_lower(header) == "host" then
-      ngx.var.upstream_host = value
+      ngx_var.upstream_host = value
+    end
+
+    if string_lower(header) == ":authority" then
+      if ngx_var.upstream_scheme == "grpc" or
+         ngx_var.upstream_scheme == "grpcs"
+      then
+        return set_authority(value)
+
+      else
+        return nil, "cannot set :authority pseudo-header on non-grpc requests"
+      end
     end
 
     ngx.req.set_header(header, normalize_header(value))
@@ -290,7 +312,7 @@ local function new(self)
   ---
   -- Adds a request header with the given value to the request to the Service. Unlike
   -- `kong.service.request.set_header()`, this function will not remove any existing
-  -- headers with the same name. Instead, several occurences of the header will be
+  -- headers with the same name. Instead, several occurrences of the header will be
   -- present in the request. The order in which headers are added is retained.
   --
   -- @function kong.service.request.add_header
@@ -307,7 +329,7 @@ local function new(self)
     validate_header(header, value)
 
     if string_lower(header) == "host" then
-      ngx.var.upstream_host = value
+      ngx_var.upstream_host = value
     end
 
     local headers = ngx.req.get_headers()[header]
@@ -394,7 +416,7 @@ local function new(self)
 
     for k, v in pairs(headers) do
       if string_lower(k) == "host" then
-        ngx.var.upstream_host = v
+        ngx_var.upstream_host = v
       end
 
       ngx.req.set_header(k, normalize_multi_header(v))
@@ -503,7 +525,7 @@ local function new(self)
             end
             keys[i] = k
             i = i + 1
-            if string_find(v, boundary_check, 1, true) then
+            if string_find(tostring(v), boundary_check, 1, true) then
               boundary_ok = false
             end
           end

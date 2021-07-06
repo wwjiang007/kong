@@ -79,13 +79,13 @@ local function execute(args)
 
   package.path = conf.lua_package_path .. ";" .. package.path
 
+  _G.kong = kong_global.new()
+  kong_global.init_pdk(_G.kong, conf, nil) -- nil: latest PDK
+
   local dc, err = declarative.new_config(conf, true)
   if not dc then
     error(err)
   end
-
-  _G.kong = kong_global.new()
-  kong_global.init_pdk(_G.kong, conf, nil) -- nil: latest PDK
 
   local db = assert(DB.new(conf))
   assert(db:init_connector())
@@ -104,6 +104,10 @@ local function execute(args)
       error("expected a declarative configuration file; see `kong config --help`")
     end
     filename = pl_path.abspath(filename)
+
+    if pl_path.extension(filename) == ".lua" then
+      log.warn("db_import of .lua files is deprecated; please convert your file into .yaml or .json")
+    end
 
     local entities, err, _, meta = dc:parse_file(filename, accepted_formats)
     if not entities then
@@ -128,6 +132,7 @@ local function execute(args)
 
         local report = {
           decl_fmt_version = meta._format_version,
+          file_ext = pl_path.extension(filename),
         }
         kong_reports.send("config-db-import", report)
       end

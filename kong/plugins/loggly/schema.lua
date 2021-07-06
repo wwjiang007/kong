@@ -9,7 +9,7 @@ local severity = {
 return {
   name = "loggly",
   fields = {
-    { protocols = typedefs.protocols_http },
+    { protocols = typedefs.protocols },
     { config = {
         type = "record",
         fields = {
@@ -26,6 +26,7 @@ return {
           { client_errors_severity = severity },
           { server_errors_severity = severity },
           { timeout = { type = "number", default = 10000 }, },
+          { custom_fields_by_lua = typedefs.lua_code },
         },
       },
     },

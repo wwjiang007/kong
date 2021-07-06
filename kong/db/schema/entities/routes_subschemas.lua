@@ -24,16 +24,16 @@ local stream_subschema = {
   name = "tcp",
 
   fields = {
-    { methods = typedefs.no_methods { err = "cannot set 'methods' when 'protocols' is 'tcp' or 'tls'" } },
-    { hosts = typedefs.no_hosts { err = "cannot set 'hosts' when 'protocols' is 'tcp' or 'tls'" } },
-    { paths = typedefs.no_paths { err = "cannot set 'paths' when 'protocols' is 'tcp' or 'tls'" } },
-    { headers = typedefs.no_headers { err = "cannot set 'headers' when 'protocols' is 'tcp' or 'tls'" } },
+    { methods = typedefs.no_methods { err = "cannot set 'methods' when 'protocols' is 'tcp', 'tls' or 'udp'" } },
+    { hosts = typedefs.no_hosts { err = "cannot set 'hosts' when 'protocols' is 'tcp', 'tls' or 'udp'" } },
+    { paths = typedefs.no_paths { err = "cannot set 'paths' when 'protocols' is 'tcp', 'tls' or 'udp'" } },
+    { headers = typedefs.no_headers { err = "cannot set 'headers' when 'protocols' is 'tcp', 'tls' or 'udp'" } },
   },
   entity_checks = {
     { conditional_at_least_one_of = { if_field = "protocols",
-                                      if_match = { elements = { type = "string", one_of = { "tcp", "tls" } } },
+                                      if_match = { elements = { type = "string", one_of = { "tcp", "tls", "udp", } } },
                                       then_at_least_one_of = { "sources", "destinations", "snis" },
-                                      then_err = "must set one of %s when 'protocols' is 'tcp' or 'tls'",
+                                      then_err = "must set one of %s when 'protocols' is 'tcp', 'tls' or 'udp'",
                                     }},
   },
 }
@@ -42,7 +42,7 @@ local grpc_subschema = {
   name = "grpc",
 
   fields = {
-    { strip_path = { type = "boolean", default = false, ne = true, err = "cannot set 'strip_path' when 'protocols' is 'grpc' or 'grpcs'" }, },
+    { strip_path = { type = "boolean", required = true, default = false, ne = true, err = "cannot set 'strip_path' when 'protocols' is 'grpc' or 'grpcs'" }, },
     { methods = typedefs.no_methods { err = "cannot set 'methods' when 'protocols' is 'grpc' or 'grpcs'" } },
     { sources = typedefs.no_sources { err = "cannot set 'sources' when 'protocols' is 'grpc' or 'grpcs'" } },
     { destinations = typedefs.no_sources { err = "cannot set 'destinations' when 'protocols' is 'grpc' or 'grpcs'" } },
@@ -66,6 +66,7 @@ return {
   https = http_subschema, -- matching protocol name is selected as subschema name
   tcp = stream_subschema,
   tls = stream_subschema,
+  udp = stream_subschema,
   grpc = grpc_subschema,
   grpcs = grpc_subschema,
 }

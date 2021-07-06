@@ -1,7 +1,7 @@
 OS := $(shell uname | awk '{print tolower($$0)}')
 MACHINE := $(shell uname -m)
 
-DEV_ROCKS = "busted 2.0.0" "busted-htest 1.0.0" "luacheck 0.23.0" "lua-llthreads2 0.1.5" "http 0.3"
+DEV_ROCKS = "busted 2.0.0" "busted-htest 1.0.0" "luacheck 0.24.0" "lua-llthreads2 0.1.6" "http 0.4" "ldoc 1.4.6"
 WIN_SCRIPTS = "bin/busted" "bin/kong"
 BUSTED_ARGS ?= -v
 TEST_CMD ?= bin/busted $(BUSTED_ARGS)
@@ -28,7 +28,8 @@ RESTY_VERSION ?= `grep RESTY_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk
 RESTY_LUAROCKS_VERSION ?= `grep RESTY_LUAROCKS_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
 RESTY_OPENSSL_VERSION ?= `grep RESTY_OPENSSL_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
 RESTY_PCRE_VERSION ?= `grep RESTY_PCRE_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
-KONG_BUILD_TOOLS ?= '4.8.1'
+KONG_BUILD_TOOLS ?= `grep KONG_BUILD_TOOLS_VERSION $(KONG_SOURCE_LOCATION)/.requirements | awk -F"=" '{print $$2}'`
+GRPCURL_VERSION ?= 1.8.1
 OPENRESTY_PATCHES_BRANCH ?= master
 KONG_NGINX_MODULE_BRANCH ?= master
 
@@ -98,7 +99,7 @@ setup-kong-build-tools:
 	-rm -rf $(KONG_BUILD_TOOLS_LOCATION)
 	-git clone https://github.com/Kong/kong-build-tools.git $(KONG_BUILD_TOOLS_LOCATION)
 	cd $(KONG_BUILD_TOOLS_LOCATION); \
-	git reset --hard $(KONG_BUILD_TOOLS); \
+	git reset --hard && git checkout $(KONG_BUILD_TOOLS); \
 
 functional-tests: setup-kong-build-tools
 	cd $(KONG_BUILD_TOOLS_LOCATION); \
@@ -112,7 +113,7 @@ install:
 remove:
 	-@luarocks remove kong
 
-dependencies: grpcurl
+dependencies: bin/grpcurl
 	@for rock in $(DEV_ROCKS) ; do \
 	  if luarocks list --porcelain $$rock | grep -q "installed" ; then \
 	    echo $$rock already installed, skipping ; \
@@ -122,17 +123,17 @@ dependencies: grpcurl
 	  fi \
 	done;
 
-grpcurl:
+bin/grpcurl:
 	@curl -s -S -L \
-		https://github.com/fullstorydev/grpcurl/releases/download/v1.3.0/grpcurl_1.3.0_$(GRPCURL_OS)_$(MACHINE).tar.gz | tar xz -C bin;
+		https://github.com/fullstorydev/grpcurl/releases/download/v$(GRPCURL_VERSION)/grpcurl_$(GRPCURL_VERSION)_$(GRPCURL_OS)_$(MACHINE).tar.gz | tar xz -C bin;
 	@rm bin/LICENSE
 
 dev: remove install dependencies
 
 lint:
 	@luacheck -q .
-	@!(grep -R -E -n -w '#only|#o' spec && echo "#only or #o tag detected") >&2
-	@!(grep -R -E -n -- '---\s+ONLY' t && echo "--- ONLY block detected") >&2
+	@!(grep -R -E -I -n -w '#only|#o' spec && echo "#only or #o tag detected") >&2
+	@!(grep -R -E -I -n -- '---\s+ONLY' t && echo "--- ONLY block detected") >&2
 
 test:
 	@$(TEST_CMD) spec/01-unit

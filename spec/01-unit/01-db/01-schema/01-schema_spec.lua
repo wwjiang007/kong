@@ -914,7 +914,28 @@ describe("schema", function()
           { f = { type = "number", required = true } }
         }
       })
-      assert.falsy(Test:validate({ k = "wat" }))
+      assert.falsy(Test:validate({ f = 1, k = "wat" }))
+    end)
+
+    it("validates on unknown fields with value of null in data plane", function()
+      local Test = Schema.new({
+        fields = {
+          { f = { type = "number", required = true } }
+        }
+      })
+      assert.falsy(Test:validate({ f = 1, k = "wat" }))
+      assert.falsy(Test:validate({ f = 1, k = ngx.null }))
+
+      _G.kong = {
+        configuration = {
+          role = "data_plane",
+        },
+      }
+
+      local ok = Test:validate({ f = 1, k = ngx.null })
+
+      _G.kong = nil
+      assert.truthy(ok)
     end)
 
     local function run_custom_check_producing_error(error)
@@ -3624,6 +3645,145 @@ describe("schema", function()
 
       assert.falsy(ok)
       assert.equals(err.list, 'immutable field cannot be updated')
+    end)
+  end)
+
+  describe("shorthand_fields", function()
+    it("converts fields", function()
+      local TestSchema = Schema.new({
+        name = "test",
+        fields = {
+          { name = { type = "string" } },
+        },
+        shorthand_fields = {
+          {
+            username = {
+              type = "string",
+              func = function(value)
+                return {
+                  name = value
+                }
+              end,
+            },
+          },
+        },
+      })
+
+      local input = { username = "test1" }
+      local output, _ = TestSchema:process_auto_fields(input)
+      assert.same({ name = "test1" }, output)
+    end)
+
+    it("can produce multiple fields", function()
+      local TestSchema = Schema.new({
+        name = "test",
+        fields = {
+          { name = { type = "string" } },
+          { address = { type = "string" } },
+        },
+        shorthand_fields = {
+          {
+            username = {
+              type = "string",
+              func = function(value)
+                return {
+                  name = value,
+                  address = value:upper(),
+                }
+              end,
+            },
+          },
+        },
+      })
+
+      local input = { username = "test1" }
+      local output, _ = TestSchema:process_auto_fields(input)
+      assert.same({ name = "test1", address = "TEST1" }, output)
+    end)
+
+    it("type checks", function()
+      local TestSchema = Schema.new({
+        name = "test",
+        fields = {
+          { name = { type = "string" } },
+          { address = { type = "string" } },
+        },
+        shorthand_fields = {
+          {
+            username = {
+              type = "string",
+              func = function(value)
+                return {
+                  name = value,
+                  address = value:upper(),
+                }
+              end,
+            },
+          },
+        },
+      })
+
+      local input = { username = 123 }
+      local ok, err = TestSchema:process_auto_fields(input)
+      assert.falsy(ok)
+      assert.same({ username = "expected a string" }, err)
+    end)
+
+    it("accepts arrays", function()
+      local TestSchema = Schema.new({
+        name = "test",
+        fields = {
+          { name = { type = "string" } },
+          { address = { type = "string" } },
+        },
+        shorthand_fields = {
+          {
+            user = {
+              type = "array",
+              elements = { type = "string" },
+              func = function(value)
+                return {
+                  name = value[1] or "mario",
+                  address = value[2] or "world",
+                }
+              end,
+            },
+          },
+        },
+      })
+
+      local input = { user = { "luigi", "land" } }
+      local output, _ = TestSchema:process_auto_fields(input)
+      assert.same({ name = "luigi", address = "land" }, output)
+    end)
+
+    it("type checks arrays", function()
+      local TestSchema = Schema.new({
+        name = "test",
+        fields = {
+          { name = { type = "string" } },
+          { address = { type = "string" } },
+        },
+        shorthand_fields = {
+          {
+            user = {
+              type = "array",
+              elements = { type = "string" },
+              func = function(value)
+                return {
+                  name = value[1] or "mario",
+                  address = value[2] or "world",
+                }
+              end,
+            },
+          },
+        },
+      })
+
+      local input = { user = "luigi,land" }
+      local ok, err = TestSchema:process_auto_fields(input)
+      assert.falsy(ok)
+      assert.same({ user = "expected an array" }, err)
     end)
   end)
 

@@ -14,6 +14,7 @@ local PHASES = {
   rewrite           = 0x00000010,
   access            = 0x00000020,
   balancer          = 0x00000040,
+  response          = 0x00000080,
   --content         = 0x00000100,
   header_filter     = 0x00000200,
   body_filter       = 0x00000400,
@@ -27,8 +28,13 @@ local PHASES = {
 
 
 do
-  local n = 0
+  local t = {}
   for k, v in pairs(PHASES) do
+    t[k] = v
+  end
+
+  local n = 0
+  for k, v in pairs(t) do
     n = n + 1
     PHASES[v] = k
   end
@@ -70,7 +76,8 @@ local function check_phase(accepted_phases)
       -- treat custom content blocks as the Admin API
       current_phase = PHASES.admin_api
     else
-      error("no phase in kong.ctx.core.phase")
+      error(fmt("no phase in kong.ctx.core.phase, (need one of %s)",
+                table.concat(get_phases_names(accepted_phases), ", ")))
     end
   end
 
@@ -116,6 +123,7 @@ end
 local public_phases = setmetatable({
   request = new_phase(PHASES.rewrite,
                       PHASES.access,
+                      PHASES.response,
                       PHASES.header_filter,
                       PHASES.body_filter,
                       PHASES.log,

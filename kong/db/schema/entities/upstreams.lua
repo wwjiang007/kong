@@ -4,16 +4,26 @@ local utils = require "kong.tools.utils"
 local null = ngx.null
 
 
+local function get_name_for_error(name)
+  local ok = utils.validate_utf8(name)
+  if not ok then
+    return "Invalid name"
+  end
+
+  return "Invalid name ('" .. name .. "')"
+end
+
+
 local validate_name = function(name)
   local p = utils.normalize_ip(name)
   if not p then
-    return nil, "Invalid name; must be a valid hostname"
+    return nil, get_name_for_error(name) .. "; must be a valid hostname"
   end
   if p.type ~= "name" then
-    return nil, "Invalid name; no ip addresses allowed"
+    return nil, get_name_for_error(name) .. "; no ip addresses allowed"
   end
   if p.port then
-    return nil, "Invalid name; no port allowed"
+    return nil, get_name_for_error(name) .. "; no port allowed"
   end
   return true
 end
@@ -44,9 +54,9 @@ local positive_int = Schema.define {
 }
 
 
-local positive_int_or_zero = Schema.define {
+local one_byte_integer = Schema.define {
   type = "integer",
-  between = { 0, 2 ^ 31 },
+  between = { 0, 255 },
 }
 
 
@@ -60,6 +70,7 @@ local check_type = Schema.define {
 local check_verify_certificate = Schema.define {
   type = "boolean",
   default = true,
+  required = true,
 }
 
 
@@ -117,10 +128,10 @@ local types = {
   timeout = seconds,
   concurrency = positive_int,
   interval = seconds,
-  successes = positive_int_or_zero,
-  tcp_failures = positive_int_or_zero,
-  timeouts = positive_int_or_zero,
-  http_failures = positive_int_or_zero,
+  successes = one_byte_integer,
+  tcp_failures = one_byte_integer,
+  timeouts = one_byte_integer,
+  http_failures = one_byte_integer,
   http_path = typedefs.path,
   http_statuses = http_statuses,
   https_sni = typedefs.sni,
@@ -233,8 +244,10 @@ local r =  {
   -- This is a hack to preserve backwards compatibility with regard to the
   -- behavior of the hash_on field, and have it take place both in the Admin API
   -- and via declarative configuration.
-  shorthands = {
-    { algorithm = function(value)
+  shorthand_fields = {
+    { algorithm = {
+      type = "string",
+      func = function(value)
         if value == "least-connections" then
           return {
             algorithm = value,
@@ -245,11 +258,13 @@ local r =  {
             algorithm = value,
           }
         end
-      end
-    },
+      end,
+    }, },
     -- Then, if hash_on is set to some non-null value, adjust the algorithm
     -- field accordingly.
-    { hash_on = function(value)
+    { hash_on = {
+      type = "string",
+      func = function(value)
         if value == null then
           return {
             hash_on = "none"
@@ -266,7 +281,7 @@ local r =  {
           }
         end
       end
-    },
+    }, },
   },
 }
 

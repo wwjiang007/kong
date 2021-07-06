@@ -1,6 +1,6 @@
 [![][kong-logo]][kong-url]
 
-[![Build Status][badge-travis-image]][badge-travis-url]
+[![Build Status][badge-action-image]][badge-action-url]
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/Kong/kong/blob/master/LICENSE)
 [![Twitter](https://img.shields.io/twitter/follow/thekonginc.svg?style=social&label=Follow)](https://twitter.com/intent/follow?screen_name=thekonginc)
 
@@ -12,12 +12,12 @@ high performance and extensibility.
 Actively maintained, Kong is widely used in production at companies ranging
 from startups to Global 5000 as well as government organizations.
 
-[Installation](https://konghq.com/install) |
+[Installation](https://konghq.com/install/#kong-community) |
 [Documentation](https://docs.konghq.com) |
 [Forum](https://discuss.konghq.com) |
 [Blog](https://konghq.com/blog) |
 IRC (freenode): [#kong](https://webchat.freenode.net/?channels=kong) |
-[Nightly Builds][kong-nightly-master]
+[Master Builds][kong-master-builds]
 
 ## Summary
 
@@ -40,11 +40,11 @@ transformations, and more through plugins.
 
 Kong has been built with the following leading principles:
 
-* **High Performance**: Sub-millisecond processing latency to support mission 
-  critical use cases and high throughput.
-* **Extensibility**: With a pluggable architecture to extend Kong in Lua or GoLang 
+* **High Performance**: Sub-millisecond processing latency to support
+* mission-critical use cases and high throughput.
+* **Extensibility**: With a pluggable architecture to extend Kong in Lua or GoLang
   with Kong's Plugin SDK.
-* **Portability**: To run on every platform, every cloud and to natively support 
+* **Portability**: To run on every platform, every cloud, and to natively support
   Kubernetes via our modern Ingress Controller.
 
 ## Features
@@ -52,7 +52,7 @@ Kong has been built with the following leading principles:
 - **Cloud-Native**: Platform agnostic, Kong can run on any platform - from bare
   metal to containers - and it can run on every cloud natively.
 - **Kubernetes-Native**: Declaratively configure Kong with native Kubernetes CRDs
-  using the official Ingress Controller to route and connect all L4 + L7 traffic. 
+  using the official Ingress Controller to route and connect all L4 + L7 traffic.
 - **Dynamic Load Balancing**: Load balance traffic across multiple upstream
   services.
 - **Hash-based Load Balancing**: Load balance with consistent hashing/sticky
@@ -108,6 +108,8 @@ code, other repos are also under active development:
   running Kong in Docker.
 - [Kong Packages](https://github.com/Kong/kong/releases): Pre-built packages
   for Debian, Red Hat, and OS X distributions (shipped with each release).
+- [Kong Gojira](https://github.com/Kong/gojira): a tool for
+  testing/developing multiple versions of Kong using containers.
 - [Kong Vagrant](https://github.com/Kong/kong-vagrant): A Vagrantfile for
   provisioning a development-ready environment for Kong.
 - [Kong Homebrew](https://github.com/Kong/homebrew-kong): Homebrew Formula
@@ -120,27 +122,62 @@ code, other repos are also under active development:
   using Azure Resource Manager.
 - [Kong on Heroku](https://github.com/heroku/heroku-kong): Deploy Kong on
   Heroku in one click.
+- [Kong on IBM Cloud](https://github.com/andrew40404/installing-kong-IBM-cloud) - How to deploy Kong on IBM Cloud
 - [Kong and Instaclustr](https://www.instaclustr.com/solutions/managed-cassandra-for-kong/): Let
   Instaclustr manage your Cassandra cluster.
-- [Nightly Builds][kong-nightly-master]: Builds of the master branch available
-  every morning at about 9AM PST.
+- [Master Builds][kong-master-builds]: Docker images for each commit in the `master` branch.
 
-You can find every supported distribution at the [official installation page](https://konghq.com/install/).
+You can find every supported distribution at the [official installation page](https://konghq.com/install/#kong-community).
 
 ## Development
 
+We encourage community contributions to Kong. To make sure it is a smooth
+experience (both for you and for the Kong team), please read
+[CONTRIBUTING.md](CONTRIBUTING.md), [DEVELOPER.md](DEVELOPER.md),
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), and [COPYRIGHT](COPYRIGHT) before
+you start.
+
 If you are planning on developing on Kong, you'll need a development
-installation. The `next` branch holds the latest unreleased source code.
+installation. The `master` branch holds the latest unreleased source code.
 
 You can read more about writing your own plugins in the [Plugin Development
 Guide](https://docs.konghq.com/latest/plugin-development/), or browse an
 online version of Kong's source code documentation in the [Plugin Development
 Kit (PDK) Reference](https://docs.konghq.com/latest/pdk/).
 
+For a quick start with custom plugin development, check out [Pongo](https://github.com/Kong/kong-pongo)
+and the [plugin template](https://github.com/Kong/kong-plugin) explained in detail below.
+
 #### Docker
 
 You can use Docker / docker-compose and a mounted volume to develop Kong by
 following the instructions on [Kong/kong-build-tools](https://github.com/Kong/kong-build-tools#developing-kong).
+
+#### Kong Gojira
+
+[Gojira](https://github.com/Kong/gojira) is a CLI that uses docker-compose
+internally to make the necessary setup of containers to get all
+dependencies needed to run a particular branch of Kong locally, as well
+as easily switching across versions, configurations and dependencies. It
+has support for running Kong in Hybrid (CP/DP) mode, testing migrations,
+running a Kong cluster, among other [features](https://github.com/Kong/gojira/blob/master/doc/manual.md).
+
+#### Kong Pongo
+
+[Pongo](https://github.com/Kong/kong-pongo) is another CLI like Gojira,
+but specific for plugin development. It is docker-compose based and will
+create local test environments including all dependencies. Core features
+are running tests, integrated linter, config initialization, CI support,
+and custom dependencies.
+
+#### Kong Plugin Template
+
+The [plugin template](https://github.com/Kong/kong-plugin) provides a basic
+plugin and is considered a best-practices plugin repository. When writing
+custom plugins we strongly suggest you start by using this repository as a
+starting point. It contains the proper file structures, configuration files,
+and CI setup to get up and running quickly. This repository seamlessly
+integrates with [Pongo](https://github.com/Kong/kong-pongo).
 
 #### Vagrant
 
@@ -162,7 +199,7 @@ $ git clone https://github.com/Kong/kong
 $ cd kong/
 
 # you might want to switch to the development branch. See CONTRIBUTING.md
-$ git checkout next
+$ git checkout master
 
 # install the Lua sources
 $ luarocks make
@@ -170,7 +207,7 @@ $ luarocks make
 
 #### Running for development
 
-Check out the [development section](https://github.com/Kong/kong/blob/next/kong.conf.default#L244)
+Check out the [development section](https://github.com/Kong/kong/blob/master/kong.conf.default#L244)
 of the default configuration file for properties to tweak in order to ease
 the development process for Kong.
 
@@ -224,7 +261,7 @@ $ make test-all
 ```
 
 Consult the [run_tests.sh](.ci/run_tests.sh) script for a more advanced example
-usage of the tests suites and the Makefile.
+usage of the test suites and the Makefile.
 
 Finally, a very useful tool in Lua development (as with many other dynamic
 languages) is performing static linting of your code. You can use [luacheck]
@@ -256,7 +293,7 @@ Enterprise](https://konghq.com/kong-enterprise-edition/).
 ## License
 
 ```
-Copyright 2016-2020 Kong Inc.
+Copyright 2016-2021 Kong Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -274,9 +311,9 @@ limitations under the License.
 [kong-url]: https://konghq.com/
 [kong-logo]: https://konghq.com/wp-content/uploads/2018/05/kong-logo-github-readme.png
 [kong-benefits]: https://konghq.com/wp-content/uploads/2018/05/kong-benefits-github-readme.png
-[kong-nightly-master]: https://bintray.com/kong/kong-nightly/master
-[badge-travis-url]: https://travis-ci.org/Kong/kong/branches
-[badge-travis-image]: https://travis-ci.org/Kong/kong.svg?branch=master
+[kong-master-builds]: https://hub.docker.com/r/kong/kong/tags
+[badge-action-url]: https://github.com/Kong/kong/actions
+[badge-action-image]: https://github.com/Kong/kong/workflows/Build%20&%20Test/badge.svg
 
 [busted]: https://github.com/Olivine-Labs/busted
 [luacheck]: https://github.com/mpeterv/luacheck

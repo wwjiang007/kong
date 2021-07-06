@@ -13,17 +13,21 @@ function BasePlugin:init_worker()
   ngx_log(DEBUG, "executing plugin \"", self._name, "\": init_worker")
 end
 
-if subsystem == "http" then
-  function BasePlugin:certificate()
-    ngx_log(DEBUG, "executing plugin \"", self._name, "\": certificate")
-  end
+function BasePlugin:certificate()
+  ngx_log(DEBUG, "executing plugin \"", self._name, "\": certificate")
+end
 
+if subsystem == "http" then
   function BasePlugin:rewrite()
     ngx_log(DEBUG, "executing plugin \"", self._name, "\": rewrite")
   end
 
   function BasePlugin:access()
     ngx_log(DEBUG, "executing plugin \"", self._name, "\": access")
+  end
+
+  function BasePlugin:response()
+   ngx_log(DEBUG, "executing plugin \"", self._name, "\": response")
   end
 
   function BasePlugin:header_filter()
